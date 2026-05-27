@@ -1,0 +1,12 @@
+# Third-party binaries and downloads (not ours, large — fetched by install scripts)
+*.exe
+*.zip
+*.7z
+
+# Generated at install time (extracted from a vendor binary)
+applogo.png
+
+# OS cruft
+Thumbs.db
+desktop.ini
+.DS_Store
