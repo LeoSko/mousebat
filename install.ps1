@@ -47,6 +47,7 @@ if (-not (Test-Path $exe)) {
 Copy-Item (Join-Path $repo 'appsettings.toml')    $InstallDir -Force
 Copy-Item (Join-Path $repo 'charge-notify.ps1')    $InstallDir -Force
 Copy-Item (Join-Path $repo 'restart-watcher.ps1')  $InstallDir -Force
+Copy-Item (Join-Path $repo 'build.ps1')            $InstallDir -Force
 
 # 3. Extract the vendor icon for the toast logo.
 Add-Type -AssemblyName System.Drawing
@@ -64,29 +65,34 @@ if (-not (Get-Module -ListAvailable -Name BurntToast)) {
     Install-Module BurntToast -Scope CurrentUser -Force -AllowClobber -Confirm:$false
 }
 
-# 5. Autostart via the Startup folder (runs in the interactive session, no admin).
-$startup = [Environment]::GetFolderPath('Startup')
+# 5. Build the single windowless watcher exe.
+$mouseExe = Join-Path $InstallDir 'MouseBattery.exe'
+& (Join-Path $InstallDir 'build.ps1') -OutDir $InstallDir | Write-Host
+if (-not (Test-Path $mouseExe)) { throw "build failed: $mouseExe not produced" }
 
-#   5a. LGSTray server shortcut.
+# 6. Autostart via the Startup folder (runs in the interactive session, no admin).
+$startup = [Environment]::GetFolderPath('Startup')
+Remove-Item (Join-Path $startup 'charge-watch.vbs') -Force -ErrorAction SilentlyContinue   # drop old launcher
 $wsh = New-Object -ComObject WScript.Shell
+
+#   6a. LGSTray server shortcut.
 $lnk = $wsh.CreateShortcut((Join-Path $startup 'LGSTray.lnk'))
 $lnk.TargetPath       = $exe
 $lnk.WorkingDirectory = $InstallDir
 $lnk.Save()
 
-#   5b. Hidden launcher for the watcher (no console flash).
-$vbs = @"
-' Launches the Logitech charge/low watcher hidden (no console flash) at logon.
-CreateObject("WScript.Shell").Run _
-  "powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File ""$InstallDir\charge-notify.ps1""", _
-  0, False
-"@
-Set-Content -Path (Join-Path $startup 'charge-watch.vbs') -Value $vbs -Encoding ASCII
+#   6b. Watcher exe shortcut.
+$lnk2 = $wsh.CreateShortcut((Join-Path $startup 'MouseBattery.lnk'))
+$lnk2.TargetPath       = $mouseExe
+$lnk2.WorkingDirectory = $InstallDir
+$lnk2.Save()
 
-# 6. Launch now.
-Start-Process -FilePath $exe -WorkingDirectory $InstallDir
-Start-Sleep -Seconds 8
-Start-Process -FilePath 'wscript.exe' -ArgumentList "`"$startup\charge-watch.vbs`""
+# 7. Launch now (kill any previous watcher first).
+Get-Process MouseBattery -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" |
+    Where-Object { $_.CommandLine -match 'charge-notify' } |
+    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+if (-not (Get-Process LGSTray -ErrorAction SilentlyContinue)) { Start-Process -FilePath $exe -WorkingDirectory $InstallDir; Start-Sleep -Seconds 8 }
+Start-Process -FilePath $mouseExe -WorkingDirectory $InstallDir
 
-Write-Host "Done. Verify the device list at http://localhost:12321/ and set the"
-Write-Host "matching device id at the top of $InstallDir\charge-notify.ps1 if it is not dev00000001."
+Write-Host "Done. The mouse is auto-discovered; verify the device list at http://localhost:12321/."

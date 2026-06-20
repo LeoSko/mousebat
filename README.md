@@ -53,7 +53,9 @@ Requires Windows 10/11 with Windows PowerShell 5.1+ (built in). No admin needed.
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
-This downloads LGSTray (skipped if already present), copies the scripts + config, extracts the toast logo, installs BurntToast (current user), registers both LGSTray and the watcher to start at logon (Startup folder), and launches them. The mouse is auto-discovered — no device id to set.
+This downloads LGSTray (skipped if already present), copies the scripts + config, extracts the toast logo, installs BurntToast (current user), **builds a single windowless `MouseBattery.exe`** (via [ps2exe](https://github.com/MScholtes/PS2EXE) — no PowerShell console window), and registers both LGSTray and that exe to start at logon (Startup-folder shortcuts). The mouse is auto-discovered — no device id to set.
+
+To (re)build the exe by hand: `powershell -ExecutionPolicy Bypass -File .\build.ps1`.
 
 ## Configure
 
@@ -74,11 +76,11 @@ After editing, restart the watcher: `restart-watcher.ps1` (kills the running wat
 
 | File | Purpose |
 |------|---------|
-| `install.ps1` | End-to-end installer (download + deploy + autostart) |
-| `charge-notify.ps1` | The watcher: polls battery, raises toasts |
-| `restart-watcher.ps1` | Restart the watcher after edits |
-| `charge-watch.vbs` | Hidden launcher template (install generates the deployed copy with the right path) |
-| `appsettings.toml` | LGSTray config (HTTP server on :12321, faster poll) |
+| `install.ps1` | End-to-end installer (download + deploy + build exe + autostart) |
+| `charge-notify.ps1` | The watcher: autodetects mice, draws tray icons, raises toasts |
+| `build.ps1` | Compile `MouseBattery.exe` (ps2exe, windowless) |
+| `restart-watcher.ps1` | Restart the exe after edits |
+| `appsettings.toml` | LGSTray config (HTTP server on :12321, GHub-only, faster poll) |
 
 The LGSTray binaries themselves are **not** committed (large, third-party); `install.ps1` downloads them.
 

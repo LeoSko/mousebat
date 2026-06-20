@@ -15,15 +15,17 @@ $env:LIB = ""; $env:LIBPATH = ""; $env:INCLUDE = ""   # ignore any leaked VS too
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
+# Our own folder whether running as a .ps1 ($PSScriptRoot) or a compiled exe (no $PSScriptRoot).
+$script:Dir     = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent ([System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName) }
 $script:Base    = 'http://localhost:12321'
-$script:Logo    = Join-Path $PSScriptRoot 'applogo.png'
-$script:LogFile = Join-Path $PSScriptRoot 'charge-notify.log'
+$script:Logo    = Join-Path $script:Dir 'applogo.png'
+$script:LogFile = Join-Path $script:Dir 'charge-notify.log'
 $script:Icons   = @{}   # name -> @{ Ni; Handle; IconObj }
 $script:Prev    = @{}   # name -> tri-state previous 'charging' (for full falling-edge)
 $script:LowSt   = @{}   # name -> bool (low toast already fired this drain cycle)
 
-Import-Module BurntToast -ErrorAction SilentlyContinue
-$script:HasToast = [bool](Get-Module BurntToast)
+# Never let a BurntToast import problem kill the app — the tray icon must still run.
+try { Import-Module BurntToast -ErrorAction Stop; $script:HasToast = $true } catch { $script:HasToast = $false }
 
 function Write-Log([string]$m) {
     try { Add-Content -Path $script:LogFile -Value ("{0}  {1}" -f (Get-Date -Format 'HH:mm:ss'), $m) } catch { }
