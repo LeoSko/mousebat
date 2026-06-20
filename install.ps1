@@ -29,13 +29,19 @@ Write-Host "Installing to $InstallDir"
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 
 # 1. Download + extract LGSTray (standalone, self-contained .NET build).
-$tag = $LgsVersion.TrimStart('v') -replace '\.','_'
-$url = "https://github.com/andyvorld/LGSTrayBattery/releases/download/$LgsVersion/Release_v$tag-standalone.zip"
-$zip = Join-Path $InstallDir 'lgstray.zip'
-Write-Host "Downloading $url"
-Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
-Expand-Archive -Path $zip -DestinationPath $InstallDir -Force
-Remove-Item $zip -Force
+#    Skip if it's already here so a redeploy doesn't re-pull ~150 MB.
+$exe = Join-Path $InstallDir 'LGSTray.exe'
+if (-not (Test-Path $exe)) {
+    $tag = $LgsVersion.TrimStart('v') -replace '\.','_'
+    $url = "https://github.com/andyvorld/LGSTrayBattery/releases/download/$LgsVersion/Release_v$tag-standalone.zip"
+    $zip = Join-Path $InstallDir 'lgstray.zip'
+    Write-Host "Downloading $url"
+    Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
+    Expand-Archive -Path $zip -DestinationPath $InstallDir -Force
+    Remove-Item $zip -Force
+} else {
+    Write-Host "LGSTray already present, skipping download"
+}
 
 # 2. Copy our config + scripts over the defaults.
 Copy-Item (Join-Path $repo 'appsettings.toml')    $InstallDir -Force
@@ -72,7 +78,7 @@ $lnk.Save()
 $vbs = @"
 ' Launches the Logitech charge/low watcher hidden (no console flash) at logon.
 CreateObject("WScript.Shell").Run _
-  "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""$InstallDir\charge-notify.ps1""", _
+  "powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File ""$InstallDir\charge-notify.ps1""", _
   0, False
 "@
 Set-Content -Path (Join-Path $startup 'charge-watch.vbs') -Value $vbs -Encoding ASCII

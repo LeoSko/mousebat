@@ -12,5 +12,7 @@ $new = Get-CimInstance Win32_Process -Filter 'Name="powershell.exe"' | Where-Obj
 if ($new) { "watcher running PID $($new.ProcessId)" } else { "watcher NOT running" }
 
 Import-Module BurntToast
-New-BurntToastNotification -Text 'Logo test', 'Mouse battery alerts now use this icon.' -AppLogo 'C:\Users\lskorospelov\Tools\LGSTray\applogo.png' -UniqueIdentifier 'lg-logotest'
+$logo = Join-Path $PSScriptRoot 'applogo.png'
+if (Test-Path $logo) { New-BurntToastNotification -Text 'Logo test', 'Mouse battery alerts now use this icon.' -AppLogo $logo -UniqueIdentifier 'lg-logotest' }
+else                 { New-BurntToastNotification -Text 'Logo test', 'Mouse battery alerts now use this icon.' -UniqueIdentifier 'lg-logotest' }
 'demo toast fired'

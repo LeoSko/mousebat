@@ -7,11 +7,16 @@ addr = "localhost"
 port = 12321
 useIpv6 = true
 
+# Only one backend enabled on purpose: GHub and Native each report the same mouse
+# once, so enabling both shows every mouse twice (different names) in the tray.
+# GHub is kept because it reports via the G HUB websocket even while the mouse is
+# idle; the Native HID++ backend goes silent on an idle mouse when G HUB owns the
+# device. If you don't run G HUB, flip these (Native on, GHub off).
 [GHub]
 enabled = true
 
 [Native]
-enabled = true
+enabled = false
 
 # Time in seconds to retry a device poll on failure
 retryTime = 10

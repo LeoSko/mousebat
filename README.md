@@ -1,24 +1,49 @@
-# lgstray — Logitech charge / low-battery notifier (Windows)
+# lgstray — Logitech mouse battery tray + notifier (Windows)
 
-Desktop toast notifications when a wireless Logitech mouse:
+A **system-tray icon per wireless Logitech mouse** showing its battery **% in a
+colour that tracks the level** (green → orange → red, blue while charging), plus
+desktop toasts when a mouse:
 
 - **finishes charging** (charge complete), and
 - **drops below a low-battery threshold** (default 5%).
 
-Logitech **G HUB** shows the battery level but never notifies on either event — this fills that gap.
+Logitech **G HUB** shows the battery level but never notifies on either event, and
+doesn't put a live % in the tray — this fills both gaps.
 
-Built and tested with a **Logitech G PRO 2 LIGHTSPEED** (HID++ over a LIGHTSPEED receiver), but works with any wireless Logitech mouse that [LGSTray](https://github.com/andyvorld/LGSTrayBattery) can read.
+The connected mouse is **auto-discovered** from LGSTray's device list (no hardcoded
+device id). Built with a **Logitech G PRO Wireless**, but works with any wireless
+Logitech mouse that [LGSTray](https://github.com/andyvorld/LGSTrayBattery) can read.
 
 ## How it works
 
 ```
-Logitech receiver ──HID++──► LGSTray.exe ──HTTP :12321──► charge-notify.ps1 ──► BurntToast toast
+Logitech receiver ─► LGSTray.exe ──HTTP :12321──► charge-notify.ps1 ─► tray icon + BurntToast
 ```
 
 - **LGSTray** ([andyvorld/LGSTrayBattery](https://github.com/andyvorld/LGSTrayBattery)) is a third-party tray app that reads battery over HID++ (or the G HUB websocket) and exposes it at `http://localhost:12321/device/<id>` as XML (`battery_percent`, `charging`).
-- **charge-notify.ps1** polls that endpoint and raises toasts via the **BurntToast** module:
-  - *Full charge* fires on the **falling edge** of the `charging` flag while ≥95% — so it never false-fires at startup (it must observe `charging=True` first).
-  - *Low battery* fires when `< LowThresh%` and not charging, **once per drain cycle** (re-arms above 10%).
+- **charge-notify.ps1** is a hidden WinForms app that polls that server, and:
+  - lists every mouse, **deduped by name**, and draws **one tray icon per mouse**
+    with its battery % (grey `?` until LGSTray has a reading);
+  - *Full charge* toast fires on the **falling edge** of the `charging` flag while
+    ≥95% — so it never false-fires at startup (it must observe `charging=True` first);
+  - *Low battery* toast fires when `< LowThresh%` and not charging, **once per drain
+    cycle** (re-arms above `LowRearm%`).
+
+### One LGSTray backend, on purpose
+
+`appsettings.toml` enables **only the GHub backend** (`[Native] enabled = false`).
+LGSTray's GHub and Native backends each report the same mouse once, so leaving both
+on lists every mouse **twice** under different names. GHub is kept because it keeps
+reporting while the mouse is idle (the Native HID++ backend goes quiet on an idle
+mouse when G HUB owns the device). No G HUB? Flip them — Native on, GHub off.
+
+## Icon legend
+
+| Colour | Meaning |
+|--------|---------|
+| green  | ≥60% (or full) · orange 30–59% · red <30% · blue charging · grey `?` no reading yet |
+
+The number is the battery %; `F` means full.
 
 ## Install
 
@@ -28,9 +53,7 @@ Requires Windows 10/11 with Windows PowerShell 5.1+ (built in). No admin needed.
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
-This downloads LGSTray, copies the scripts + config, extracts the toast logo, installs BurntToast (current user), registers both LGSTray and the watcher to start at logon (Startup folder), and launches them.
-
-Then open <http://localhost:12321/> to confirm your device, and if its id is not `dev00000001`, set it at the top of `charge-notify.ps1` (the deployed copy under `%USERPROFILE%\Tools\LGSTray`).
+This downloads LGSTray (skipped if already present), copies the scripts + config, extracts the toast logo, installs BurntToast (current user), registers both LGSTray and the watcher to start at logon (Startup folder), and launches them. The mouse is auto-discovered — no device id to set.
 
 ## Configure
 
@@ -38,7 +61,6 @@ Edit the `param(...)` block at the top of `charge-notify.ps1`:
 
 | Param | Default | Meaning |
 |-------|---------|---------|
-| `DeviceId` | `dev00000001` | LGSTray device id (from the device list page) |
 | `PollSeconds` | `60` | HTTP poll interval |
 | `FullMin` | `95.0` | charge-stop above this % counts as "full" |
 | `LowThresh` | `5.0` | warn below this % |
