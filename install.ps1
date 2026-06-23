@@ -1,72 +1,42 @@
 <#
 .SYNOPSIS
-  Installs the Logitech charge / low-battery notifier on this Windows machine.
+  Installs the Logitech mouse battery tray utility (mousebat).
 
 .DESCRIPTION
-  - Downloads LGSTray (vendor tray app that exposes battery over a local HTTP
-    server) and extracts it to -InstallDir.
-  - Copies our config + scripts from this repo.
-  - Extracts the app icon to applogo.png for the toast logo.
+  - Copies mousebat.ps1 + discharge-stats.ps1 + build.ps1 to -InstallDir.
+  - Generates a small toast logo (applogo.png).
   - Installs the BurntToast PowerShell module (current user).
-  - Builds MouseBattery.exe (the headless notifier) from charge-notify.ps1.
-  - Registers LGSTray + MouseBattery to start at logon via Startup shortcuts
-    (launch-once, no admin, no background loop, no auto-restart).
-  - Launches everything immediately.
+  - Builds mousebat.exe (~50 KB, windowless) via build.ps1 (ps2exe).
+  - Registers it at logon (single Startup shortcut) and removes any legacy
+    LGSTray / watchdog autostart entries from older versions.
+  - Launches it.
 
-  LGSTray draws its own tray icon per device and cannot be told to hide it, so
-  MouseBattery runs headless (no icon of its own) and only adds what LGSTray
-  lacks: toasts on full/low and a CSV discharge log for discharge-stats.ps1.
+  mousebat reads battery from Logitech G HUB's local websocket, so G HUB must be
+  running. No LGSTray, no bundled runtime: the exe rides on the built-in .NET
+  Framework, and the whole install is well under 1 MB.
 
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File .\install.ps1
 #>
-param(
-    [string]$InstallDir = "$env:USERPROFILE\Tools\LGSTray",
-    [string]$LgsVersion = "v3.0.3"
-)
+param([string]$InstallDir = "$env:USERPROFILE\Tools\LGSTray")
 
 $ErrorActionPreference = 'Stop'
 $repo = $PSScriptRoot
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-
-Write-Host "Installing to $InstallDir"
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 
-# 0. The framework-dependent LGSTray build (~5 MB) needs the .NET 8 Desktop
-#    Runtime. Using it instead of the self-contained build (~220 MB) is the whole
-#    reason this install is small. Warn if the runtime is missing.
-$hasDesktop = $false
-try { $hasDesktop = (dotnet --list-runtimes 2>$null) -match 'Microsoft\.WindowsDesktop\.App 8\.' } catch { }
-if (-not $hasDesktop) {
-    Write-Warning "Microsoft .NET 8 Desktop Runtime not found. Install it first (winget install Microsoft.DotNet.DesktopRuntime.8), else LGSTray won't start."
-}
-
-# 1. Download + extract the framework-dependent LGSTray (~3 MB zip), then prune
-#    the parts we don't use: the Native HID backend (we read via GHub) + symbols.
-$tag = $LgsVersion.TrimStart('v') -replace '\.','_'
-$url = "https://github.com/andyvorld/LGSTrayBattery/releases/download/$LgsVersion/Release_v$tag.zip"
-$zip = Join-Path $InstallDir 'lgstray.zip'
-Write-Host "Downloading $url"
-Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
-Expand-Archive -Path $zip -DestinationPath $InstallDir -Force
-Remove-Item $zip -Force
-Remove-Item (Join-Path $InstallDir 'LGSTrayHID.exe'), (Join-Path $InstallDir 'hidapi.dll') -Force -ErrorAction SilentlyContinue
-Get-ChildItem $InstallDir -Filter *.pdb | Remove-Item -Force -ErrorAction SilentlyContinue
-
-# 2. Copy our config + scripts over the defaults.
-foreach ($f in 'appsettings.toml', 'charge-notify.ps1', 'build.ps1', 'restart-watcher.ps1', 'discharge-stats.ps1') {
+# 1. Copy scripts.
+foreach ($f in 'mousebat.ps1', 'discharge-stats.ps1', 'build.ps1') {
     Copy-Item (Join-Path $repo $f) $InstallDir -Force
 }
 
-# 3. Extract the vendor icon for the toast logo.
+# 2. Toast logo (a simple battery-green disc).
 Add-Type -AssemblyName System.Drawing
-$exe = Join-Path $InstallDir 'LGSTray.exe'
-$ico = [System.Drawing.Icon]::ExtractAssociatedIcon($exe)
-$bmp = $ico.ToBitmap()
-$bmp.Save((Join-Path $InstallDir 'applogo.png'), [System.Drawing.Imaging.ImageFormat]::Png)
-$bmp.Dispose(); $ico.Dispose()
+$bmp = New-Object System.Drawing.Bitmap 64, 64
+$g = [System.Drawing.Graphics]::FromImage($bmp); $g.SmoothingMode = 'AntiAlias'; $g.Clear([System.Drawing.Color]::Transparent)
+$g.FillEllipse((New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(46, 204, 113))), 2, 2, 59, 59)
+$g.Dispose(); $bmp.Save((Join-Path $InstallDir 'applogo.png'), [System.Drawing.Imaging.ImageFormat]::Png); $bmp.Dispose()
 
-# 4. BurntToast (toast notifications), current user only.
+# 3. BurntToast (toast notifications), current user only.
 if (-not (Get-Module -ListAvailable -Name BurntToast)) {
     if (-not (Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue)) {
         Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope CurrentUser | Out-Null
@@ -74,30 +44,19 @@ if (-not (Get-Module -ListAvailable -Name BurntToast)) {
     Install-Module BurntToast -Scope CurrentUser -Force -AllowClobber -Confirm:$false
 }
 
-# 5. Build the headless notifier exe (MouseBattery.exe) from charge-notify.ps1
-#    (build.ps1 self-installs ps2exe if needed).
+# 4. Build the exe.
 & (Join-Path $InstallDir 'build.ps1') -OutDir $InstallDir
 
-# 6. Autostart: launch each once at logon via Startup shortcuts. No admin, no
-#    background loop or window — LGSTray is a GUI app and MouseBattery.exe is
-#    windowless, so neither flashes. No auto-restart by design: if LGSTray
-#    crashes it stays down until next logon, and charge-notify.log records the
-#    DOWN edge + the LGSTray crashlog so the cause is debuggable.
+# 5. Autostart: single Startup shortcut. Remove any legacy LGSTray/watchdog entries.
 $startup = [Environment]::GetFolderPath('Startup')
-#   Remove any legacy entries from older installs.
-Remove-Item (Join-Path $startup 'charge-watch.vbs'), (Join-Path $startup 'lgstray-watchdog.vbs') -ErrorAction SilentlyContinue
+Remove-Item (Join-Path $startup 'LGSTray.lnk'), (Join-Path $startup 'MouseBattery.lnk'), (Join-Path $startup 'lgstray-watchdog.vbs'), (Join-Path $startup 'charge-watch.vbs') -ErrorAction SilentlyContinue
+Remove-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name LGSTrayGUI -ErrorAction SilentlyContinue
 $wsh = New-Object -ComObject WScript.Shell
-foreach ($t in @(@{N = 'LGSTray.lnk'; E = 'LGSTray.exe' }, @{N = 'MouseBattery.lnk'; E = 'MouseBattery.exe' })) {
-    $lnk = $wsh.CreateShortcut((Join-Path $startup $t.N))
-    $lnk.TargetPath       = Join-Path $InstallDir $t.E
-    $lnk.WorkingDirectory = $InstallDir
-    $lnk.Save()
-}
+$lnk = $wsh.CreateShortcut((Join-Path $startup 'mousebat.lnk'))
+$lnk.TargetPath = Join-Path $InstallDir 'mousebat.exe'; $lnk.WorkingDirectory = $InstallDir; $lnk.Save()
 
-# 7. Launch now (LGSTray first so its server is up before the watcher polls).
-Start-Process -FilePath (Join-Path $InstallDir 'LGSTray.exe') -WorkingDirectory $InstallDir
-Start-Sleep -Seconds 8
-Start-Process -FilePath (Join-Path $InstallDir 'MouseBattery.exe') -WorkingDirectory $InstallDir
+# 6. Launch.
+Start-Process (Join-Path $InstallDir 'mousebat.exe') -WorkingDirectory $InstallDir
 
-Write-Host "Done. Device list: http://localhost:12321/  (the watcher auto-discovers mice)."
-Write-Host "Stats:  powershell -ExecutionPolicy Bypass -File `"$InstallDir\discharge-stats.ps1`""
+Write-Host ("Done ({0} KB exe). Requires Logitech G HUB running." -f [math]::Round((Get-Item (Join-Path $InstallDir 'mousebat.exe')).Length / 1KB))
+Write-Host "Stats: powershell -ExecutionPolicy Bypass -File `"$InstallDir\discharge-stats.ps1`""

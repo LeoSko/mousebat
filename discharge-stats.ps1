@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
   Discharge statistics + "is it draining faster than usual?" analysis for the
-  Logitech mouse battery, from battery-history.csv (written by charge-notify.ps1).
+  Logitech mouse battery, from battery-history.csv (written by mousebat.ps1).
 
 .DESCRIPTION
   The mouse has a sleep mode: idle it drains very slowly, in use much faster, so a
