@@ -32,14 +32,26 @@ $repo = $PSScriptRoot
 Write-Host "Installing to $InstallDir"
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 
-# 1. Download + extract LGSTray (standalone, self-contained .NET build).
+# 0. The framework-dependent LGSTray build (~5 MB) needs the .NET 8 Desktop
+#    Runtime. Using it instead of the self-contained build (~220 MB) is the whole
+#    reason this install is small. Warn if the runtime is missing.
+$hasDesktop = $false
+try { $hasDesktop = (dotnet --list-runtimes 2>$null) -match 'Microsoft\.WindowsDesktop\.App 8\.' } catch { }
+if (-not $hasDesktop) {
+    Write-Warning "Microsoft .NET 8 Desktop Runtime not found. Install it first (winget install Microsoft.DotNet.DesktopRuntime.8), else LGSTray won't start."
+}
+
+# 1. Download + extract the framework-dependent LGSTray (~3 MB zip), then prune
+#    the parts we don't use: the Native HID backend (we read via GHub) + symbols.
 $tag = $LgsVersion.TrimStart('v') -replace '\.','_'
-$url = "https://github.com/andyvorld/LGSTrayBattery/releases/download/$LgsVersion/Release_v$tag-standalone.zip"
+$url = "https://github.com/andyvorld/LGSTrayBattery/releases/download/$LgsVersion/Release_v$tag.zip"
 $zip = Join-Path $InstallDir 'lgstray.zip'
 Write-Host "Downloading $url"
 Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
 Expand-Archive -Path $zip -DestinationPath $InstallDir -Force
 Remove-Item $zip -Force
+Remove-Item (Join-Path $InstallDir 'LGSTrayHID.exe'), (Join-Path $InstallDir 'hidapi.dll') -Force -ErrorAction SilentlyContinue
+Get-ChildItem $InstallDir -Filter *.pdb | Remove-Item -Force -ErrorAction SilentlyContinue
 
 # 2. Copy our config + scripts over the defaults.
 foreach ($f in 'appsettings.toml', 'charge-notify.ps1', 'build.ps1', 'restart-watcher.ps1', 'discharge-stats.ps1') {

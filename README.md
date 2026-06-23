@@ -31,7 +31,9 @@ Both start at logon via plain **Startup shortcuts** — launch-once, no backgrou
 
 ## Install
 
-Requires Windows 10/11 with Windows PowerShell 5.1+ (built in). No admin needed.
+Requires Windows 10/11 with Windows PowerShell 5.1+ (built in) and the **.NET 8 Desktop Runtime** (`winget install Microsoft.DotNet.DesktopRuntime.8`). No admin needed.
+
+Using the framework-dependent LGSTray build keeps the install ~5 MB instead of ~220 MB (the self-contained build bundles the whole .NET + WPF runtime inside each exe). The ~5 MB is LGSTray's WPF app; our scripts are ~30 KB.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install.ps1
