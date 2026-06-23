@@ -9,8 +9,8 @@
   - Extracts the app icon to applogo.png for the toast logo.
   - Installs the BurntToast PowerShell module (current user).
   - Builds MouseBattery.exe (the headless notifier) from charge-notify.ps1.
-  - Registers ONE hidden watchdog at logon that keeps both LGSTray and
-    MouseBattery alive (Startup folder, no admin needed).
+  - Registers LGSTray + MouseBattery to start at logon via Startup shortcuts
+    (launch-once, no admin, no background loop, no auto-restart).
   - Launches everything immediately.
 
   LGSTray draws its own tray icon per device and cannot be told to hide it, so
@@ -42,7 +42,7 @@ Expand-Archive -Path $zip -DestinationPath $InstallDir -Force
 Remove-Item $zip -Force
 
 # 2. Copy our config + scripts over the defaults.
-foreach ($f in 'appsettings.toml', 'charge-notify.ps1', 'build.ps1', 'restart-watcher.ps1', 'lgstray-watchdog.ps1', 'discharge-stats.ps1') {
+foreach ($f in 'appsettings.toml', 'charge-notify.ps1', 'build.ps1', 'restart-watcher.ps1', 'discharge-stats.ps1') {
     Copy-Item (Join-Path $repo $f) $InstallDir -Force
 }
 
@@ -66,21 +66,26 @@ if (-not (Get-Module -ListAvailable -Name BurntToast)) {
 #    (build.ps1 self-installs ps2exe if needed).
 & (Join-Path $InstallDir 'build.ps1') -OutDir $InstallDir
 
-# 6. Autostart: ONE hidden watchdog that keeps LGSTray + MouseBattery alive
-#    (no admin; survives the LGSTray dispose-crash a logon shortcut can't).
+# 6. Autostart: launch each once at logon via Startup shortcuts. No admin, no
+#    background loop or window — LGSTray is a GUI app and MouseBattery.exe is
+#    windowless, so neither flashes. No auto-restart by design: if LGSTray
+#    crashes it stays down until next logon, and charge-notify.log records the
+#    DOWN edge + the LGSTray crashlog so the cause is debuggable.
 $startup = [Environment]::GetFolderPath('Startup')
 #   Remove any legacy entries from older installs.
-Remove-Item (Join-Path $startup 'LGSTray.lnk'), (Join-Path $startup 'MouseBattery.lnk'), (Join-Path $startup 'charge-watch.vbs') -ErrorAction SilentlyContinue
-$vbs = @"
-' Starts the LGSTray + MouseBattery watchdog hidden at logon (no console flash).
-CreateObject("WScript.Shell").Run _
-  "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""$InstallDir\lgstray-watchdog.ps1""", _
-  0, False
-"@
-Set-Content -Path (Join-Path $startup 'lgstray-watchdog.vbs') -Value $vbs -Encoding ASCII
+Remove-Item (Join-Path $startup 'charge-watch.vbs'), (Join-Path $startup 'lgstray-watchdog.vbs') -ErrorAction SilentlyContinue
+$wsh = New-Object -ComObject WScript.Shell
+foreach ($t in @(@{N = 'LGSTray.lnk'; E = 'LGSTray.exe' }, @{N = 'MouseBattery.lnk'; E = 'MouseBattery.exe' })) {
+    $lnk = $wsh.CreateShortcut((Join-Path $startup $t.N))
+    $lnk.TargetPath       = Join-Path $InstallDir $t.E
+    $lnk.WorkingDirectory = $InstallDir
+    $lnk.Save()
+}
 
-# 7. Launch now.
-Start-Process -FilePath 'wscript.exe' -ArgumentList "`"$startup\lgstray-watchdog.vbs`""
+# 7. Launch now (LGSTray first so its server is up before the watcher polls).
+Start-Process -FilePath (Join-Path $InstallDir 'LGSTray.exe') -WorkingDirectory $InstallDir
+Start-Sleep -Seconds 8
+Start-Process -FilePath (Join-Path $InstallDir 'MouseBattery.exe') -WorkingDirectory $InstallDir
 
 Write-Host "Done. Device list: http://localhost:12321/  (the watcher auto-discovers mice)."
 Write-Host "Stats:  powershell -ExecutionPolicy Bypass -File `"$InstallDir\discharge-stats.ps1`""

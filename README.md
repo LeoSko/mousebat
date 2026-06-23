@@ -26,7 +26,8 @@ Logitech receiver ──HID++──► LGSTray.exe ──HTTP :12321──► Mo
   - appends `battery-history.csv` (one row per state change) for the stats script.
 
   It runs **headless** (no tray icon of its own): LGSTray's icon can't be hidden, so a second icon would just be a duplicate. Toggle LGSTray's **"Display Numeric Icon"** menu item if you want the % drawn on its icon.
-- **lgstray-watchdog.ps1** is the autostart: ONE hidden process that keeps both LGSTray and MouseBattery running, relaunching either within ~60s if it exits/crashes (a plain Startup shortcut never restarts LGSTray after its known dispose-crash).
+
+Both start at logon via plain **Startup shortcuts** — launch-once, no background loop, no auto-restart. If LGSTray crashes it stays down until next logon (no restart by design); `charge-notify.log` records a single **`LGSTray server DOWN`** line naming the matching LGSTray `crashlog_*.log`, and `LGSTray server up` on recovery, so the cause is debuggable without log spam.
 
 ## Install
 
@@ -36,7 +37,7 @@ Requires Windows 10/11 with Windows PowerShell 5.1+ (built in). No admin needed.
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
-This downloads LGSTray, copies the scripts + config, extracts the toast logo, installs BurntToast (current user), builds `MouseBattery.exe`, registers the watchdog at logon, and launches everything. Mice are **auto-discovered** — no device id to configure.
+This downloads LGSTray, copies the scripts + config, extracts the toast logo, installs BurntToast (current user), builds `MouseBattery.exe`, registers both at logon via Startup shortcuts, and launches everything. Mice are **auto-discovered** — no device id to configure.
 
 ## Discharge stats
 
@@ -77,7 +78,6 @@ Edit the `param(...)` block at the top of `charge-notify.ps1`, then rebuild + re
 | `install.ps1` | End-to-end installer (download + build + autostart) |
 | `charge-notify.ps1` | The headless watcher: polls battery, toasts, logs CSV (compiled to `MouseBattery.exe`) |
 | `build.ps1` | Compiles `charge-notify.ps1` → `MouseBattery.exe` via ps2exe |
-| `lgstray-watchdog.ps1` | Keeps LGSTray + MouseBattery alive; the autostart entry |
 | `discharge-stats.ps1` | Discharge-rate stats + "faster than usual?" analysis |
 | `restart-watcher.ps1` | Rebuild-free restart of the watcher after edits |
 | `appsettings.toml` | LGSTray config (HTTP server on :12321, faster poll, GHub-only) |

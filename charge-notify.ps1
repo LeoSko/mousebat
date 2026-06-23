@@ -23,6 +23,7 @@ $script:DataFile = Join-Path $script:Dir 'battery-history.csv'   # discharge sta
 $script:Prev     = @{}   # name -> tri-state previous 'charging' (for full falling-edge)
 $script:LowSt    = @{}   # name -> bool (low toast already fired this drain cycle)
 $script:LastRow  = @{}   # name -> last logged "pct|charging" (CSV row written only on change)
+$script:SrvUp    = $null # tri-state reachability of the LGSTray server (edge-logged, not per-poll)
 
 # Never let a BurntToast import problem kill the watcher — it must keep logging.
 try { Import-Module BurntToast -ErrorAction Stop; $script:HasToast = $true } catch { $script:HasToast = $false }
@@ -89,7 +90,18 @@ function Get-LgsMice {
 function Invoke-Poll {
     try {
         $mice = Get-LgsMice
-        if ($null -eq $mice) { Write-Log 'LGSTray server unreachable'; return }
+        if ($null -eq $mice) {
+            # Edge-log the DOWN transition only (not every poll) and point at the
+            # crash cause: LGSTray writes crashlog_<unixtime>.log with a stack trace.
+            if ($script:SrvUp -ne $false) {
+                $cl = Get-ChildItem (Join-Path $script:Dir 'crashlog_*.log') -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+                $note = if ($cl) { " (LGSTray exited; newest crashlog: $($cl.Name) @ $($cl.LastWriteTime.ToString('HH:mm:ss')))" } else { ' (LGSTray not responding; no crashlog found)' }
+                Write-Log "LGSTray server DOWN$note"
+                $script:SrvUp = $false
+            }
+            return
+        }
+        if ($script:SrvUp -ne $true) { Write-Log 'LGSTray server up'; $script:SrvUp = $true }
 
         foreach ($m in $mice) {
             # LGSTray reports a negative percent until it has a fresh reading.
@@ -115,12 +127,19 @@ function Invoke-Poll {
 # --- run --------------------------------------------------------------------
 Write-Log "watcher starting (headless, poll ${PollSeconds}s, toast=$($script:HasToast))"
 
-# "Armed" toast once per machine only (marker file), so watchdog restarts stay silent.
+# "Armed" toast once per machine only (marker file), so relaunches stay silent.
 $armedFlag = Join-Path $script:Dir '.armed'
 if (-not (Test-Path $armedFlag)) {
     Show-Toast 'Mouse battery watcher armed' ("Pings on full charge and below {0}%." -f $LowThresh) 'lg-armed'
     try { New-Item -ItemType File -Path $armedFlag -Force | Out-Null } catch { }
 }
 
-Invoke-Poll
-while ($true) { Start-Sleep -Seconds $PollSeconds; Invoke-Poll }
+# Top-level guard: log why the watcher died before exiting (no auto-restart by
+# design — a clean crash trail in charge-notify.log is enough to debug the cause).
+try {
+    Invoke-Poll
+    while ($true) { Start-Sleep -Seconds $PollSeconds; Invoke-Poll }
+} catch {
+    Write-Log "FATAL watcher exit: $($_.Exception.Message)"
+    throw
+}
