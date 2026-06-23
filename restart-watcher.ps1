@@ -1,16 +1,26 @@
-# Kill any running watcher, relaunch hidden, fire a demo toast with the new logo.
-$procs = Get-CimInstance Win32_Process -Filter 'Name="powershell.exe"'
-$procs | Where-Object { $_.CommandLine -match 'charge-notify' } | ForEach-Object {
-    Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
-    "killed old watcher PID $($_.ProcessId)"
-}
-Start-Sleep -Seconds 1
-$su = [Environment]::GetFolderPath('Startup')
-Start-Process -FilePath 'wscript.exe' -ArgumentList "`"$su\charge-watch.vbs`""
-Start-Sleep -Seconds 3
-$new = Get-CimInstance Win32_Process -Filter 'Name="powershell.exe"' | Where-Object { $_.CommandLine -match 'charge-notify' }
-if ($new) { "watcher running PID $($new.ProcessId)" } else { "watcher NOT running" }
+# Kill any running watcher (exe or the old .ps1 form), relaunch the exe, fire a demo toast.
+$exe = Join-Path $PSScriptRoot 'MouseBattery.exe'
 
-Import-Module BurntToast
-New-BurntToastNotification -Text 'Logo test', 'Mouse battery alerts now use this icon.' -AppLogo 'C:\Users\lskorospelov\Tools\LGSTray\applogo.png' -UniqueIdentifier 'lg-logotest'
-'demo toast fired'
+Get-Process MouseBattery -ErrorAction SilentlyContinue | ForEach-Object {
+    Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+    "killed exe PID $($_.Id)"
+}
+Get-CimInstance Win32_Process -Filter 'Name="powershell.exe"' |
+    Where-Object { $_.CommandLine -match 'charge-notify' } |
+    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue; "killed ps1 PID $($_.ProcessId)" }
+
+Start-Sleep -Seconds 1
+if (Test-Path $exe) { Start-Process -FilePath $exe -WorkingDirectory $PSScriptRoot }
+else { "MouseBattery.exe not found - run build.ps1 or install.ps1 first" }
+Start-Sleep -Seconds 3
+
+$new = Get-Process MouseBattery -ErrorAction SilentlyContinue
+if ($new) { "watcher running PID $($new.Id)" } else { "watcher NOT running" }
+
+Import-Module BurntToast -ErrorAction SilentlyContinue
+$logo = Join-Path $PSScriptRoot 'applogo.png'
+if (Get-Module BurntToast) {
+    if (Test-Path $logo) { New-BurntToastNotification -Text 'Mouse battery watcher restarted', 'Tray icon refreshed.' -AppLogo $logo -UniqueIdentifier 'lg-restart' }
+    else                 { New-BurntToastNotification -Text 'Mouse battery watcher restarted', 'Tray icon refreshed.' -UniqueIdentifier 'lg-restart' }
+    'demo toast fired'
+}

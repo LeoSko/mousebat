@@ -3,8 +3,15 @@
 *.zip
 *.7z
 
-# Generated at install time (extracted from a vendor binary)
+# Generated at install time / runtime (machine-specific, regenerated)
 applogo.png
+battery-history.csv
+.armed
+*.log
+*.pdb
+
+# Tooling state
+.aislop/
 
 # OS cruft
 Thumbs.db
