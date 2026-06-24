@@ -1,10 +1,11 @@
 param([switch]$Chart)
 
-# Self-contained Logitech mouse battery tray utility. Reads battery from the LGHUB
-# agent's local websocket (ws://127.0.0.1:9010 - the same source G HUB's own UI
-# uses), draws one numeric tray icon, toasts on full charge / low battery, logs a
-# CSV history, and renders a battery chart from it. No LGSTray, no extra runtime:
-# compiles to a single ~80 KB windowless exe (ps2exe -noConsole) on top of the
+# Self-contained Logitech mouse battery tray utility. Reads battery directly over
+# HID++ from the receiver (works with G HUB closed), and falls back to the LGHUB
+# agent's local websocket (ws://127.0.0.1:9010) if HID++ returns nothing while
+# G HUB is up. Draws one numeric tray icon, toasts on full charge / low battery,
+# logs a CSV history, and renders a battery chart from it. No LGSTray, no extra
+# runtime: compiles to a single ~80 KB windowless exe (ps2exe -noConsole) on the
 # built-in .NET Framework. A wireless mouse only reports battery while awake, so
 # the last reading is cached to disk and shown when the mouse is asleep/off.
 
@@ -12,6 +13,92 @@ $ErrorActionPreference = 'Stop'
 $env:LIB = ""; $env:LIBPATH = ""; $env:INCLUDE = ""   # ignore leaked VS toolchain vars (break Add-Type)
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
+
+# Win32 HID for the direct HID++ reader (works with G HUB off; the only reader
+# that does). Reads through the receiver's long-report interface (UsagePage
+# 0xFF00, 20-byte reports) with overlapped I/O + timeouts.
+if (-not ('Hid.Api' -as [type])) {
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+namespace Hid {
+  [StructLayout(LayoutKind.Sequential)] public struct HIDD_ATTRIBUTES { public int Size; public ushort VendorID; public ushort ProductID; public ushort VersionNumber; }
+  [StructLayout(LayoutKind.Sequential)] public struct HIDP_CAPS {
+    public ushort Usage; public ushort UsagePage; public ushort InputReportByteLength; public ushort OutputReportByteLength; public ushort FeatureReportByteLength;
+    [MarshalAs(UnmanagedType.ByValArray, SizeConst=17)] public ushort[] Reserved;
+    public ushort NumberLinkCollectionNodes; public ushort a1,a2,a3,a4,a5,a6,a7,a8,a9;
+  }
+  [StructLayout(LayoutKind.Sequential)] public struct SP_DEVICE_INTERFACE_DATA { public int cbSize; public Guid g; public int Flags; public IntPtr Reserved; }
+  [StructLayout(LayoutKind.Sequential)] public struct OVERLAPPED { public IntPtr Internal; public IntPtr InternalHigh; public uint OffLow; public uint OffHigh; public IntPtr hEvent; }
+  public static class Api {
+    [DllImport("hid.dll")] public static extern void HidD_GetHidGuid(out Guid g);
+    [DllImport("hid.dll")] public static extern bool HidD_GetAttributes(IntPtr h, ref HIDD_ATTRIBUTES a);
+    [DllImport("hid.dll")] public static extern bool HidD_GetPreparsedData(IntPtr h, out IntPtr pp);
+    [DllImport("hid.dll")] public static extern bool HidD_FreePreparsedData(IntPtr pp);
+    [DllImport("hid.dll")] public static extern int  HidP_GetCaps(IntPtr pp, out HIDP_CAPS caps);
+    [DllImport("setupapi.dll", CharSet=CharSet.Auto)] public static extern IntPtr SetupDiGetClassDevs(ref Guid g, IntPtr e, IntPtr w, int f);
+    [DllImport("setupapi.dll")] public static extern bool SetupDiEnumDeviceInterfaces(IntPtr s, IntPtr d, ref Guid g, int i, ref SP_DEVICE_INTERFACE_DATA data);
+    [DllImport("setupapi.dll", CharSet=CharSet.Auto)] public static extern bool SetupDiGetDeviceInterfaceDetail(IntPtr s, ref SP_DEVICE_INTERFACE_DATA data, IntPtr det, int sz, ref int req, IntPtr di);
+    [DllImport("setupapi.dll")] public static extern bool SetupDiDestroyDeviceInfoList(IntPtr s);
+    [DllImport("kernel32.dll", CharSet=CharSet.Auto, SetLastError=true)] public static extern IntPtr CreateFile(string n, uint a, uint sh, IntPtr se, uint dp, uint fl, IntPtr t);
+    [DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr h);
+    [DllImport("kernel32.dll", SetLastError=true)] public static extern bool WriteFile(IntPtr h, byte[] b, int n, out int w, ref OVERLAPPED o);
+    [DllImport("kernel32.dll", SetLastError=true)] public static extern bool ReadFile(IntPtr h, byte[] b, int n, out int r, ref OVERLAPPED o);
+    [DllImport("kernel32.dll")] public static extern IntPtr CreateEvent(IntPtr a, bool m, bool i, string n);
+    [DllImport("kernel32.dll")] public static extern uint WaitForSingleObject(IntPtr h, uint ms);
+    [DllImport("kernel32.dll")] public static extern bool GetOverlappedResult(IntPtr h, ref OVERLAPPED o, out int n, bool wait);
+    [DllImport("kernel32.dll")] public static extern bool CancelIo(IntPtr h);
+    const uint GENR=0x80000000, GENW=0x40000000, SHARE=3, OPEN=3, OVL=0x40000000; const int PRESENT=0x2, IFACE=0x10;
+    public static string FindLongHidpp() {
+      Guid g; HidD_GetHidGuid(out g);
+      IntPtr set = SetupDiGetClassDevs(ref g, IntPtr.Zero, IntPtr.Zero, PRESENT|IFACE);
+      try {
+        for (int i=0;;i++) {
+          var d = new SP_DEVICE_INTERFACE_DATA(); d.cbSize = Marshal.SizeOf(d);
+          if (!SetupDiEnumDeviceInterfaces(set, IntPtr.Zero, ref g, i, ref d)) break;
+          int req=0; SetupDiGetDeviceInterfaceDetail(set, ref d, IntPtr.Zero, 0, ref req, IntPtr.Zero);
+          IntPtr det = Marshal.AllocHGlobal(req); Marshal.WriteInt32(det, IntPtr.Size==8?8:6);
+          string path=null;
+          if (SetupDiGetDeviceInterfaceDetail(set, ref d, det, req, ref req, IntPtr.Zero)) path = Marshal.PtrToStringAuto(new IntPtr(det.ToInt64()+4));
+          Marshal.FreeHGlobal(det);
+          if (path==null) continue;
+          IntPtr h = CreateFile(path, GENR|GENW, SHARE, IntPtr.Zero, OPEN, 0, IntPtr.Zero);
+          if (h==(IntPtr)(-1)) continue;
+          try {
+            var a = new HIDD_ATTRIBUTES(); a.Size = Marshal.SizeOf(a);
+            if (!HidD_GetAttributes(h, ref a) || a.VendorID!=0x046D) continue;
+            IntPtr pp; if (!HidD_GetPreparsedData(h, out pp)) continue;
+            HIDP_CAPS c; HidP_GetCaps(pp, out c); HidD_FreePreparsedData(pp);
+            if (c.UsagePage==0xFF00 && c.OutputReportByteLength==20) return path;
+          } finally { CloseHandle(h); }
+        }
+      } finally { SetupDiDestroyDeviceInfoList(set); }
+      return null;
+    }
+    public static IntPtr Open(string path) { return CreateFile(path, GENR|GENW, SHARE, IntPtr.Zero, OPEN, OVL, IntPtr.Zero); }
+    public static bool Write(IntPtr h, byte[] data) {
+      var o = new OVERLAPPED(); o.hEvent = CreateEvent(IntPtr.Zero, true, false, null);
+      int w; bool ok = WriteFile(h, data, data.Length, out w, ref o);
+      if (!ok && Marshal.GetLastWin32Error()==997) { WaitForSingleObject(o.hEvent, 1000); ok = GetOverlappedResult(h, ref o, out w, false); }
+      CloseHandle(o.hEvent); return ok;
+    }
+    public static byte[] Read(IntPtr h, uint timeoutMs) {
+      var o = new OVERLAPPED(); o.hEvent = CreateEvent(IntPtr.Zero, true, false, null);
+      byte[] buf = new byte[20]; int r; bool ok = ReadFile(h, buf, 20, out r, ref o);
+      if (!ok) {
+        if (Marshal.GetLastWin32Error()==997) {
+          if (WaitForSingleObject(o.hEvent, timeoutMs)==0) ok = GetOverlappedResult(h, ref o, out r, false);
+          else { CancelIo(h); CloseHandle(o.hEvent); return null; }
+        } else { CloseHandle(o.hEvent); return null; }
+      }
+      CloseHandle(o.hEvent);
+      if (!ok) return null;
+      byte[] res = new byte[r]; Array.Copy(buf, res, r); return res;
+    }
+  }
+}
+'@
+}
 
 $script:Dir       = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent ([System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName) }
 $script:Logo      = Join-Path $script:Dir 'applogo.png'
@@ -28,6 +115,7 @@ $script:Prev      = @{}   # name -> previous charging (full falling-edge)
 $script:LowSt     = @{}   # name -> low toast fired this drain cycle
 $script:LastRow   = @{}   # name -> last CSV "pct|charging"
 $script:SrvUp     = $null
+$script:GHubName  = $null  # friendly mouse name learned from G HUB (used to label HID++ readings)
 
 try { Import-Module BurntToast -ErrorAction Stop; $script:HasToast = $true } catch { $script:HasToast = $false }
 
@@ -49,6 +137,77 @@ function Write-Data($name, [int]$pct, [bool]$charging) {
         if (-not (Test-Path $script:DataFile)) { Add-Content -Path $script:DataFile -Value 'timestamp,name,percent,charging' }
         Add-Content -Path $script:DataFile -Value ('{0},{1},{2},{3}' -f (Get-Date -Format 'o'), ($name -replace ',', ' '), $pct, $charging)
     } catch { Write-Log "data write failed: $_" }
+}
+
+# --- direct HID++ reader (no G HUB needed) ---------------------------------
+# Feature 0x1001 reports voltage only; LGSTray/Solaar mV->% lookup converts it.
+$script:MvLUT = 4186,4156,4143,4133,4122,4113,4103,4094,4086,4075,4067,4059,4051,4043,4035,4027,4019,4011,4003,3997,
+                3989,3983,3976,3969,3961,3955,3949,3942,3935,3929,3922,3916,3909,3902,3896,3890,3883,3877,3870,3865,
+                3859,3853,3848,3842,3837,3833,3828,3824,3819,3815,3811,3808,3804,3800,3797,3793,3790,3787,3784,3781,
+                3778,3775,3772,3770,3767,3764,3762,3759,3757,3754,3751,3748,3744,3741,3737,3734,3730,3726,3724,3720,
+                3717,3714,3710,3706,3702,3697,3693,3688,3683,3677,3671,3666,3662,3658,3654,3646,3633,3612,3579,3537
+$script:SW = 0   # rotating HID++ software id (1..15) so each call matches only its reply
+
+function ConvertTo-Percent([int]$mv) {
+    for ($i = 0; $i -lt $script:MvLUT.Length; $i++) { if ($mv -gt $script:MvLUT[$i]) { return $script:MvLUT.Length - $i } }
+    return 0
+}
+function Invoke-Hidpp($h, [byte]$dev, [byte]$feat, [byte]$func, [byte[]]$params) {
+    $script:SW = ($script:SW % 15) + 1
+    $sw = [byte]$script:SW
+    while ($null -ne [Hid.Api]::Read($h, 0)) { }   # flush stale/unsolicited reports
+    $req = New-Object byte[] 20
+    $req[0] = 0x11; $req[1] = $dev; $req[2] = $feat; $req[3] = ([byte](($func -shl 4) -bor $sw))
+    for ($i = 0; $i -lt $params.Length -and $i -lt 16; $i++) { $req[4 + $i] = $params[$i] }
+    if (-not [Hid.Api]::Write($h, $req)) { return $null }
+    for ($try = 0; $try -lt 16; $try++) {
+        $r = [Hid.Api]::Read($h, 500)
+        if ($null -eq $r) { return $null }
+        if ($r.Length -lt 5 -or $r[1] -ne $dev) { continue }
+        if ($r[2] -eq 0xFF -and $r[3] -eq $feat -and ($r[4] -band 0x0F) -eq $sw) { return @{ Error = $r[5] } }
+        if ($r[2] -eq $feat -and ($r[3] -band 0x0F) -eq $sw) { return @{ Data = $r } }
+    }
+    return $null
+}
+function Get-FeatureIndex($h, [byte]$dev, [int]$fid) {
+    $res = Invoke-Hidpp $h $dev 0x00 0x00 @([byte](($fid -shr 8) -band 0xFF), [byte]($fid -band 0xFF))
+    if ($res -and $res.Data) { return $res.Data[4] }
+    return 0
+}
+# Returns @{ Percent; Charging } for the first responding mouse, or $null if no
+# device answers (asleep / off / receiver unplugged).
+function Get-HidppBattery {
+    $path = try { [Hid.Api]::FindLongHidpp() } catch { $null }
+    if (-not $path) { return $null }
+    $h = [Hid.Api]::Open($path)
+    if ($h -eq [IntPtr](-1)) { return $null }
+    try {
+        foreach ($dev in 1, 2, 0xFF) {
+            $i1001 = Get-FeatureIndex $h $dev 0x1001
+            if (-not $i1001) { continue }
+            $r = Invoke-Hidpp $h $dev $i1001 0x00 @()
+            if (-not $r -or -not $r.Data) { continue }
+            $mv = ([int]$r.Data[4] -shl 8) -bor [int]$r.Data[5]   # [int] cast: PS -shl on [byte] truncates
+            if ($mv -lt 2000) { continue }   # implausible (stale/zero) - treat as no reading
+            $flags = [int]$r.Data[6]
+            $charging = (($flags -band 0x80) -ne 0) -and (($flags -band 0x07) -in 0, 1)   # bit7 set + mode charging/full
+            return @{ Percent = ConvertTo-Percent $mv; Charging = $charging }
+        }
+        return $null
+    } finally { [void][Hid.Api]::CloseHandle($h) }
+}
+
+# --- reader dispatcher: HID++ first (independent), G HUB websocket fallback --
+function Get-Readings {
+    $hid = try { Get-HidppBattery } catch { $null }
+    if ($hid) {
+        $names = @((Get-State).Keys)
+        $n = if ($script:GHubName) { $script:GHubName } elseif ($names.Count -eq 1) { $names[0] } else { 'Logitech Mouse' }
+        return @{ Reachable = $true; Source = 'hidpp'; Mice = @(@{ Name = $n; Percent = $hid.Percent; Charging = $hid.Charging }) }
+    }
+    $g = Get-GHubMice
+    foreach ($m in $g.Mice) { $script:GHubName = $m.Name }   # remember the friendly name for HID++ labelling
+    return @{ Reachable = $g.Reachable; Source = 'ghub'; Mice = $g.Mice }
 }
 
 # --- G HUB websocket reader ------------------------------------------------
@@ -260,11 +419,11 @@ function Invoke-Chart {
 # --- poll ------------------------------------------------------------------
 function Invoke-Poll {
     try {
-        $res = Get-GHubMice
+        $res = Get-Readings
         if (-not $res.Reachable) {
-            if ($script:SrvUp -ne $false) { Write-Log 'LGHUB agent unreachable'; $script:SrvUp = $false }
-        } else {
-            if ($script:SrvUp -ne $true) { Write-Log 'LGHUB agent up'; $script:SrvUp = $true }
+            if ($script:SrvUp -ne $false) { Write-Log 'no battery source (mouse off HID++ and G HUB down)'; $script:SrvUp = $false }
+        } elseif ($res.Mice.Count) {
+            if ($script:SrvUp -ne $true) { Write-Log "battery source up ($($res.Source))"; $script:SrvUp = $true }
         }
 
         $state = Get-State
@@ -300,7 +459,7 @@ function Invoke-Poll {
 # --- run -------------------------------------------------------------------
 if ($Chart) { Invoke-Chart; if (Test-Path $script:ChartFile) { Start-Process $script:ChartFile }; return }
 
-Write-Log "mousebat starting (GHub ws, toast=$($script:HasToast))"
+Write-Log "mousebat starting (HID++ + GHub fallback, toast=$($script:HasToast))"
 Get-Settings   # load saved thresholds (overrides the defaults above)
 # Seed the cache from the last CSV reading so an icon shows at once (mouse may be asleep at logon).
 if (-not (Test-Path $script:StateFile) -and (Test-Path $script:DataFile)) {
