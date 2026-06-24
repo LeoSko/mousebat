@@ -1,4 +1,4 @@
-// mousebat — native Logitech mouse battery tray utility.
+// mousebat - native Logitech mouse battery tray utility.
 // Reads battery directly over HID++ from the receiver (works with G HUB closed),
 // falls back to the G HUB agent's local websocket, draws one numeric tray icon,
 // shows full/low toasts, logs a CSV history, charts it, and edits thresholds from

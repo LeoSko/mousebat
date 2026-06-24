@@ -1,90 +1,56 @@
-# mousebat — Logitech mouse battery tray utility (Windows)
+# mousebat
 
-A tiny **~26 KB native** tray utility for wireless Logitech mice:
-
-- one **tray icon** showing battery % (colour-coded by level / charging),
-- **toast notifications** on **full charge** and **low battery** (configurable),
-- a **CSV history** with a **battery chart** and a **discharge-rate analysis**
-  ("is it draining faster than usual?").
-
-Logitech **G HUB** shows the level but never notifies — this fills that gap, in a
-single windowless exe with **no runtime to install and no G HUB dependency**.
+Windows tray utility for wireless Logitech mouse battery. Shows the level in the
+tray, notifies on full charge and low battery, and logs history for a chart and
+discharge analysis. Single ~26 KB exe, nothing to install, G HUB not required.
 
 ## How it works
 
-```
-Logitech receiver ──HID++ (USB HID)──►┐
-                                       ├─► mousebat.exe ──► tray icon + toast + battery-history.csv
-G HUB agent ──ws://127.0.0.1:9010────►┘   (HID++ first; G HUB only as fallback)
-```
+Reads the battery over HID++ straight from the receiver, so it works with G HUB
+closed. If that returns nothing while G HUB is running, it falls back to G HUB's
+local websocket. A wireless mouse only reports battery while awake; the last
+reading is cached and shown while it sleeps. Runs headless, started once at logon.
 
-- **mousebat.exe** (compiled from `mousebat.cs` with the built-in C# compiler)
-  reads the battery two ways:
-  1. **HID++ directly** from the receiver (feature `0x1001` voltage → % via the
-     Solaar lookup) — needs no G HUB, works with it closed.
-  2. if HID++ returns nothing (and G HUB is running), it falls back to the **G HUB
-     agent's local websocket**.
-  Then it draws the tray icon, raises toasts (native balloon → Action Center), and
-  logs the CSV.
-  - *Full charge* fires on the **falling edge** of `charging` while ≥ `FullMin`%
-    (never false-fires at startup); *low battery* fires below `LowThresh`% and not
-    charging, **once per drain cycle** (re-arms above `LowRearm`%).
-  - A wireless mouse only reports battery while **awake** — asleep/off, *neither*
-    HID++ nor G HUB returns anything. The last reading is cached to
-    `battery-state.json` (seeded from the CSV at startup) and shown meanwhile, so
-    the icon always has a value; it refreshes on use.
-- It runs **headless**, started **once at logon** by a Startup shortcut.
+Notifications:
+
+- Full charge: charging stops at or above 95% (default).
+- Low battery: below 5% (default) and not charging, once per drain cycle.
 
 ## Install
 
-Requires Windows 10/11 with the **.NET Framework 4.x** (built in) — that's it. No
-admin, no downloads, G HUB optional.
+Needs Windows 10/11 with .NET Framework 4.x (built in). No admin.
 
-Grab `mousebat.exe` from the [latest release](../../releases/latest) (built by CI),
-or build from source:
+Download `mousebat.exe` from the [latest release](../../releases/latest), or build
+from source:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
-## CI / releases
-
-GitHub Actions (`.github/workflows/release.yml`) compiles `mousebat.exe` on a
-`windows-latest` runner for every push (uploaded as an artifact). Push a tag like
-`v1.0.0` to publish a GitHub Release with the exe attached:
-
-```bash
-git tag v1.0.0 && git push origin v1.0.0
-```
-
-Compiles `mousebat.exe` via `csc.exe`, registers it at logon, and launches it.
-Mice are auto-discovered.
+It compiles the exe with `csc.exe` and registers it to start at logon.
 
 ## Settings, chart, stats
 
-- **Thresholds**: **double-click the tray icon** (or right-click → Settings…) to
-  set Low / Re-arm / Full %, saved to `mousebat-settings.json`.
-- **Chart**: tray → **Battery chart** (renders `battery-chart.png` from the CSV),
-  or `mousebat.exe -Chart`.
-- **Discharge analysis**: `powershell -File discharge-stats.ps1` — active drain
-  %/hr (+ runtime per charge), sleep drain %/hr, and a faster-than-usual verdict.
-  Each interval is classified active vs sleep (< `-SleepThreshold` %/hr = sleep)
-  and the anomaly check uses **active intervals only**, so idle time never skews it.
+- Thresholds: double-click the tray icon (or right-click, Settings) to set the
+  low, re-arm and full percentages.
+- Chart: tray menu "Battery chart", or run `mousebat.exe -Chart`.
+- Discharge analysis: `powershell -File discharge-stats.ps1` reports active vs
+  sleep drain rate and whether recent drain is faster than usual.
 
 ## Files
 
 | File | Purpose |
 |------|---------|
-| `mousebat.cs` | The utility: HID++/G HUB reader, tray icon, toasts, CSV, chart, settings |
-| `build.ps1` | Compiles `mousebat.cs` → `mousebat.exe` via `csc.exe` |
-| `discharge-stats.ps1` | Discharge-rate stats + "faster than usual?" analysis |
-| `install.ps1` | Compile + autostart installer |
+| `mousebat.cs` | The app: reader, tray icon, toasts, CSV, chart, settings |
+| `build.ps1` | Compiles `mousebat.cs` to `mousebat.exe` with `csc.exe` |
+| `install.ps1` | Build and register at logon |
+| `discharge-stats.ps1` | Discharge-rate analysis |
 
-`mousebat.exe`, `battery-history.csv`, `battery-state.json`, `battery-chart.png`,
-`mousebat-settings.json`, logs and `.armed` are generated locally and not committed.
+## Releases
 
-## Notes
+GitHub Actions builds the exe on every push. Push a `v*` tag to publish a release
+with the exe attached:
 
-- Toasts use the tray icon's balloon (Windows routes it to the Action Center); no
-  custom app logo.
-- WSL users: everything runs on the Windows host.
+```bash
+git tag v1.1.0 && git push github v1.1.0
+```
