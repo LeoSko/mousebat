@@ -15,6 +15,8 @@ jobs:
     runs-on: windows-latest   # needs .NET Framework csc.exe + WinForms/DataVisualization
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0       # full history + tags, for the changelog
 
       - name: Compile mousebat.exe
         shell: pwsh
@@ -26,9 +28,19 @@ jobs:
           name: mousebat
           path: mousebat.exe
 
+      - name: Build release notes (on v* tag)
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          prev=$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)
+          if [ -n "$prev" ]; then range="$prev..${GITHUB_REF_NAME}"; else range="${GITHUB_REF_NAME}"; fi
+          { echo "## Changes"; echo; git log --no-merges --pretty='- %s' "$range"; } > RELEASE_NOTES.md
+          cat RELEASE_NOTES.md
+
       - name: Publish release (on v* tag)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           files: mousebat.exe
-          generate_release_notes: true
+          body_path: RELEASE_NOTES.md
+          generate_release_notes: true   # appends GitHub's auto compare link
