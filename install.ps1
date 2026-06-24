@@ -16,7 +16,7 @@
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File .\install.ps1
 #>
-param([string]$InstallDir = "$env:USERPROFILE\Tools\LGSTray")
+param([string]$InstallDir = "$env:USERPROFILE\Tools\mousebat")
 
 $ErrorActionPreference = 'Stop'
 $repo = $PSScriptRoot

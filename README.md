@@ -46,8 +46,21 @@ bundle: framework-dependent LGSTray (~5 MB) → a ps2exe PowerShell tray app (~5
 Requires Windows 10/11 with the **.NET Framework 4.x** (built in) — that's it. No
 admin, no downloads, G HUB optional.
 
+Grab `mousebat.exe` from the [latest release](../../releases/latest) (built by CI),
+or build from source:
+
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+## CI / releases
+
+GitHub Actions (`.github/workflows/release.yml`) compiles `mousebat.exe` on a
+`windows-latest` runner for every push (uploaded as an artifact). Push a tag like
+`v1.0.0` to publish a GitHub Release with the exe attached:
+
+```bash
+git tag v1.0.0 && git push origin v1.0.0
 ```
 
 Copies the source, compiles `mousebat.exe` via `csc.exe`, registers it at logon
