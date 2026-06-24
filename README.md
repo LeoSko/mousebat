@@ -4,6 +4,16 @@ Windows tray utility for wireless Logitech mouse battery. Shows the level in the
 tray, notifies on full charge, low battery, and unusually fast drain, and logs
 history for a chart. Single ~30 KB exe, nothing to install, G HUB not required.
 
+## Screenshots
+
+Tray icon, colour-coded by level and charging state:
+
+![tray icon](docs/tray.png)
+
+Thresholds dialog (double-click the tray icon) and battery history chart:
+
+![settings](docs/settings.png) ![chart](docs/chart.png)
+
 ## How it works
 
 Reads the battery over HID++ straight from the receiver, so it works with G HUB
