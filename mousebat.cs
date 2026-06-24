@@ -143,13 +143,25 @@ namespace MouseBat
             {
                 foreach (byte dev in new byte[] { 1, 2, 0xFF })
                 {
+                    // Unified Battery (0x1004): modern mice report state-of-charge directly as a %.
+                    int fu = FeatureIndex(h, dev, 0x1004);
+                    if (fu != 0)
+                    {
+                        byte[] r = Hidpp(h, dev, (byte)fu, 1, new byte[0]);   // func 1 = getStatus
+                        if (r != null && r[4] >= 1 && r[4] <= 100)
+                        {
+                            bool chg = r[6] == 1 || r[6] == 2;                // 0 discharging, 1/2 charging
+                            return new Reading { Percent = r[4], Charging = chg };
+                        }
+                    }
+                    // Legacy Battery Voltage (0x1001): older mice report mV, mapped via the LUT.
                     int fi = FeatureIndex(h, dev, 0x1001);
                     if (fi == 0) continue;
-                    byte[] r = Hidpp(h, dev, (byte)fi, 0, new byte[0]);
-                    if (r == null) continue;
-                    int mv = (r[4] << 8) | r[5];
+                    byte[] rv = Hidpp(h, dev, (byte)fi, 0, new byte[0]);
+                    if (rv == null) continue;
+                    int mv = (rv[4] << 8) | rv[5];
                     if (mv < 2000) continue;   // implausible (stale/zero)
-                    int flags = r[6];
+                    int flags = rv[6];
                     bool charging = (flags & 0x80) != 0 && ((flags & 0x07) == 0 || (flags & 0x07) == 1);
                     return new Reading { Percent = LutPercent(mv), Charging = charging };
                 }
@@ -194,7 +206,9 @@ namespace MouseBat
                 res.Reachable = true;
                 var ser = new JavaScriptSerializer();
                 WsSend(ws, "{\"msgId\":\"\",\"verb\":\"GET\",\"path\":\"/devices/list\"}");
-                object[] devs = null;
+                // JavaScriptSerializer deserializes JSON arrays as ArrayList, not object[],
+                // so treat all arrays as IEnumerable (an object[] cast silently yields null).
+                System.Collections.IEnumerable devs = null;
                 for (int i = 0; i < 12 && devs == null; i++)
                 {
                     string m = WsRecv(ws, 1500); if (m == null) break;
@@ -202,7 +216,7 @@ namespace MouseBat
                     if (o.ContainsKey("path") && (o["path"] as string) == "/devices/list")
                     {
                         var p = AsObj(o["payload"]);
-                        if (p != null && p.ContainsKey("deviceInfos")) devs = p["deviceInfos"] as object[];
+                        if (p != null && p.ContainsKey("deviceInfos")) devs = p["deviceInfos"] as System.Collections.IEnumerable;
                     }
                 }
                 if (devs == null) return res;
@@ -276,6 +290,7 @@ namespace MouseBat
                 string status = c.Charging ? (c.Percent >= FullMin ? "full" : "charging") : "discharging";
                 UpdateIcon(kv.Key, c.Percent, status, true);
             }
+            EnsurePlaceholder();   // show "?" icon until a mouse reports; removed once one does
             SaveState();
             CheckDrainAnomaly();
         }
@@ -329,24 +344,49 @@ namespace MouseBat
         }
 
         // --- tray icon -------------------------------------------------------
+        const string PlaceholderKey = "\0placeholder";
+
+        NotifyIcon NewTrayIcon()
+        {
+            var ni = new NotifyIcon();
+            var menu = new ContextMenuStrip();
+            menu.Items.Add("Settings...", null, (s, e) => ShowSettings());
+            var auto = new ToolStripMenuItem("Start with Windows", null, (s, e) => ToggleAutostart());
+            menu.Items.Add(auto);
+            menu.Items.Add("Battery chart", null, (s, e) => { BuildChart(); OpenChart(); });
+            menu.Items.Add("Exit", null, (s, e) => ExitApp());
+            menu.Opening += (s, e) => auto.Checked = autostart;   // reflect current state
+            ni.ContextMenuStrip = menu;
+            ni.DoubleClick += (s, e) => ShowSettings();
+            ni.Visible = true;
+            return ni;
+        }
+
+        // Keep one icon present even before the first reading (mouse asleep / not
+        // found yet) so the menu stays reachable; replaced once a mouse reports.
+        void EnsurePlaceholder()
+        {
+            if (icons.Keys.Any(k => k != PlaceholderKey)) { RemovePlaceholder(); return; }
+            if (icons.ContainsKey(PlaceholderKey)) return;
+            var ni = NewTrayIcon();
+            ni.Icon = MakeIcon(0, "none");
+            ni.Text = "Mouse battery: waiting for a reading";
+            icons[PlaceholderKey] = ni;
+        }
+        void RemovePlaceholder()
+        {
+            NotifyIcon ni;
+            if (!icons.TryGetValue(PlaceholderKey, out ni)) return;
+            icons.Remove(PlaceholderKey);
+            ni.Visible = false;
+            if (ni.Icon != null) Native.DestroyIcon(ni.Icon.Handle);
+            ni.Dispose();
+        }
+
         void UpdateIcon(string name, int pct, string status, bool stale)
         {
             NotifyIcon ni;
-            if (!icons.TryGetValue(name, out ni))
-            {
-                ni = new NotifyIcon();
-                var menu = new ContextMenuStrip();
-                menu.Items.Add("Settings...", null, (s, e) => ShowSettings());
-                var auto = new ToolStripMenuItem("Start with Windows", null, (s, e) => ToggleAutostart());
-                menu.Items.Add(auto);
-                menu.Items.Add("Battery chart", null, (s, e) => { BuildChart(); OpenChart(); });
-                menu.Items.Add("Exit", null, (s, e) => ExitApp());
-                menu.Opening += (s, e) => auto.Checked = autostart;   // reflect current state
-                ni.ContextMenuStrip = menu;
-                ni.DoubleClick += (s, e) => ShowSettings();
-                ni.Visible = true;
-                icons[name] = ni;
-            }
+            if (!icons.TryGetValue(name, out ni)) { ni = NewTrayIcon(); icons[name] = ni; }
             Icon old = ni.Icon;
             ni.Icon = MakeIcon(pct, status);
             if (old != null) { Native.DestroyIcon(old.Handle); old.Dispose(); }
@@ -361,13 +401,14 @@ namespace MouseBat
             g.SmoothingMode = SmoothingMode.AntiAlias; g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
             g.Clear(Color.Transparent);
             Color col;
-            if (status == "full") col = Color.FromArgb(39, 174, 96);
+            if (status == "none") col = Color.FromArgb(127, 140, 141);
+            else if (status == "full") col = Color.FromArgb(39, 174, 96);
             else if (status == "charging") col = Color.FromArgb(41, 128, 185);
             else if (pct >= 60) col = Color.FromArgb(46, 204, 113);
             else if (pct >= 30) col = Color.FromArgb(243, 156, 18);
             else col = Color.FromArgb(231, 76, 60);
             using (var br = new SolidBrush(col)) g.FillEllipse(br, 0, 0, 31, 31);
-            string label = pct >= 100 ? "F" : pct.ToString();
+            string label = status == "none" ? "?" : (pct >= 100 ? "F" : pct.ToString());
             int fpx = label.Length >= 3 ? 13 : label.Length == 2 ? 17 : 21;
             using (var font = new Font("Segoe UI", fpx, FontStyle.Bold, GraphicsUnit.Pixel))
             using (var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
