@@ -1,5 +1,3 @@
 # Stored as LF, checked out as CRLF on Windows (these run on Windows).
 *.ps1 text eol=crlf
-*.vbs text eol=crlf
-*.toml text eol=crlf
 *.md  text

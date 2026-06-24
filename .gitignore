@@ -1,17 +1,13 @@
-# Third-party binaries and downloads (not ours, large — fetched by install scripts)
+# Built exe
 *.exe
-*.zip
-*.7z
 
-# Generated at install time / runtime (machine-specific, regenerated)
-applogo.png
+# Generated at runtime
 battery-history.csv
-mousebat-settings.json
 battery-state.json
 battery-chart.png
+mousebat-settings.json
 .armed
 *.log
-*.pdb
 
 # Tooling state
 .aislop/

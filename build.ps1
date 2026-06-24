@@ -3,8 +3,8 @@
   Compiles mousebat.cs into a native windowless exe with the built-in C# compiler.
 
 .DESCRIPTION
-  No PowerShell host, no ps2exe -- csc.exe (shipped with the .NET Framework on
-  every Windows) produces a ~20 KB exe. Extra references beyond the csc defaults:
+  csc.exe (shipped with the .NET Framework on every Windows) produces a ~26 KB
+  exe. Extra references beyond the csc defaults:
   System.Web.Extensions (JavaScriptSerializer, for G HUB JSON) and
   System.Windows.Forms.DataVisualization (the battery chart).
 #>

@@ -8,8 +8,7 @@ A tiny **~26 KB native** tray utility for wireless Logitech mice:
   ("is it draining faster than usual?").
 
 Logitech **G HUB** shows the level but never notifies — this fills that gap, in a
-single windowless exe with **no PowerShell host, no bundled runtime, and no G HUB
-dependency**.
+single windowless exe with **no runtime to install and no G HUB dependency**.
 
 ## How it works
 
@@ -22,7 +21,7 @@ G HUB agent ──ws://127.0.0.1:9010────►┘   (HID++ first; G HUB on
 - **mousebat.exe** (compiled from `mousebat.cs` with the built-in C# compiler)
   reads the battery two ways:
   1. **HID++ directly** from the receiver (feature `0x1001` voltage → % via the
-     Solaar/LGSTray lookup) — needs no G HUB, works with it closed.
+     Solaar lookup) — needs no G HUB, works with it closed.
   2. if HID++ returns nothing (and G HUB is running), it falls back to the **G HUB
      agent's local websocket**.
   Then it draws the tray icon, raises toasts (native balloon → Action Center), and
@@ -31,15 +30,10 @@ G HUB agent ──ws://127.0.0.1:9010────►┘   (HID++ first; G HUB on
     (never false-fires at startup); *low battery* fires below `LowThresh`% and not
     charging, **once per drain cycle** (re-arms above `LowRearm`%).
   - A wireless mouse only reports battery while **awake** — asleep/off, *neither*
-    HID++ nor G HUB returns anything (true of every tool, LGSTray included). The
-    last reading is cached to `battery-state.json` (seeded from the CSV at startup)
-    and shown meanwhile, so the icon always has a value; it refreshes on use.
-- It runs **headless**, started **once at logon** by a Startup shortcut — no
-  background loop, no watchdog, no auto-restart.
-
-This is the end of an evolution that began with the 226 MB third-party **LGSTray**
-bundle: framework-dependent LGSTray (~5 MB) → a ps2exe PowerShell tray app (~56 KB)
-→ this native C# exe (~26 KB).
+    HID++ nor G HUB returns anything. The last reading is cached to
+    `battery-state.json` (seeded from the CSV at startup) and shown meanwhile, so
+    the icon always has a value; it refreshes on use.
+- It runs **headless**, started **once at logon** by a Startup shortcut.
 
 ## Install
 
@@ -63,9 +57,8 @@ GitHub Actions (`.github/workflows/release.yml`) compiles `mousebat.exe` on a
 git tag v1.0.0 && git push origin v1.0.0
 ```
 
-Copies the source, compiles `mousebat.exe` via `csc.exe`, registers it at logon
-(removing any legacy LGSTray/watchdog autostart), and launches it. Mice are
-auto-discovered.
+Compiles `mousebat.exe` via `csc.exe`, registers it at logon, and launches it.
+Mice are auto-discovered.
 
 ## Settings, chart, stats
 
