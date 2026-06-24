@@ -22,11 +22,10 @@ $ErrorActionPreference = 'Stop'
 $repo = $PSScriptRoot
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 
-# 1. Copy source + scripts, then compile.
-foreach ($f in 'mousebat.cs', 'build.ps1', 'discharge-stats.ps1') {
-    Copy-Item (Join-Path $repo $f) $InstallDir -Force
-}
-& (Join-Path $InstallDir 'build.ps1') -OutDir $InstallDir
+# 1. Compile the exe straight into InstallDir (source + build stay in the repo,
+#    so the install folder holds only the exe + the stats tool + runtime data).
+& (Join-Path $repo 'build.ps1') -OutDir $InstallDir
+Copy-Item (Join-Path $repo 'discharge-stats.ps1') $InstallDir -Force
 
 # 2. Autostart: single Startup shortcut. Remove legacy entries from older installs.
 $startup = [Environment]::GetFolderPath('Startup')
