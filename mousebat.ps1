@@ -19,6 +19,7 @@ $script:LogFile   = Join-Path $script:Dir 'mousebat.log'
 $script:DataFile  = Join-Path $script:Dir 'battery-history.csv'
 $script:StateFile = Join-Path $script:Dir 'battery-state.json'
 $script:ChartFile = Join-Path $script:Dir 'battery-chart.png'
+$script:SettingsFile = Join-Path $script:Dir 'mousebat-settings.json'
 $script:FullMin   = 95.0
 $script:LowThresh = 5.0
 $script:LowRearm  = 10.0
@@ -127,6 +128,49 @@ function Save-State($state) {
     try { $state | ConvertTo-Json -Depth 4 | Set-Content -Path $script:StateFile } catch { Write-Log "state save failed: $_" }
 }
 
+# --- notification thresholds (editable from the tray, persisted to JSON) -----
+function Get-Settings {
+    if (-not (Test-Path $script:SettingsFile)) { return }
+    try {
+        $s = Get-Content $script:SettingsFile -Raw | ConvertFrom-Json
+        if ($null -ne $s.FullMin)   { $script:FullMin   = [double]$s.FullMin }
+        if ($null -ne $s.LowThresh) { $script:LowThresh = [double]$s.LowThresh }
+        if ($null -ne $s.LowRearm)  { $script:LowRearm  = [double]$s.LowRearm }
+    } catch { Write-Log "settings load failed: $_" }
+}
+function Save-Settings {
+    try { [pscustomobject]@{ FullMin = $script:FullMin; LowThresh = $script:LowThresh; LowRearm = $script:LowRearm } | ConvertTo-Json | Set-Content -Path $script:SettingsFile }
+    catch { Write-Log "settings save failed: $_" }
+}
+function Show-Settings {
+    $f = New-Object System.Windows.Forms.Form
+    $f.Text = 'Mouse Battery - notification thresholds'
+    $f.ClientSize = New-Object System.Drawing.Size(310, 170)
+    $f.FormBorderStyle = 'FixedDialog'; $f.StartPosition = 'CenterScreen'
+    $f.MaximizeBox = $false; $f.MinimizeBox = $false; $f.TopMost = $true
+    $mk = {
+        param([string]$text, [int]$y, [int]$min, [int]$max, $val)
+        $lbl = New-Object System.Windows.Forms.Label
+        $lbl.Text = $text; $lbl.SetBounds(14, ($y + 3), 220, 20); $f.Controls.Add($lbl)
+        $nud = New-Object System.Windows.Forms.NumericUpDown
+        $nud.SetBounds(236, $y, 60, 24); $nud.Minimum = $min; $nud.Maximum = $max; $nud.DecimalPlaces = 0
+        $nud.Value = [decimal][math]::Min([math]::Max($val, $min), $max); $f.Controls.Add($nud); $nud
+    }
+    $nLow  = & $mk 'Low battery warning at (%):' 20  1 50  ([int]$script:LowThresh)
+    $nRe   = & $mk 'Re-arm low warning above (%):' 52 1 60 ([int]$script:LowRearm)
+    $nFull = & $mk 'Full charge at (%):' 84 50 100 ([int]$script:FullMin)
+    $ok = New-Object System.Windows.Forms.Button; $ok.Text = 'Save'; $ok.SetBounds(135, 128, 75, 28); $ok.DialogResult = 'OK'; $f.Controls.Add($ok); $f.AcceptButton = $ok
+    $cn = New-Object System.Windows.Forms.Button; $cn.Text = 'Cancel'; $cn.SetBounds(218, 128, 75, 28); $cn.DialogResult = 'Cancel'; $f.Controls.Add($cn); $f.CancelButton = $cn
+    if ($f.ShowDialog() -eq 'OK') {
+        $script:LowThresh = [double]$nLow.Value
+        $script:LowRearm  = [double]$nRe.Value
+        $script:FullMin   = [double]$nFull.Value
+        Save-Settings
+        Write-Log "settings updated: low=$($script:LowThresh) rearm=$($script:LowRearm) full=$($script:FullMin)"
+    }
+    $f.Dispose()
+}
+
 # --- tray icon -------------------------------------------------------------
 function New-PercentIcon([object]$pct, [string]$status) {
     $bmp = New-Object System.Drawing.Bitmap 32, 32
@@ -169,9 +213,11 @@ function Update-MouseIcon([string]$name, [int]$pct, [string]$status, [bool]$stal
     if (-not $script:Icons.ContainsKey($name)) {
         $ni = New-Object System.Windows.Forms.NotifyIcon
         $menu = New-Object System.Windows.Forms.ContextMenuStrip
+        [void]$menu.Items.Add('Settings...', $null, { Show-Settings })
         [void]$menu.Items.Add('Battery chart', $null, { Invoke-Chart; try { Start-Process $script:ChartFile } catch { } })
         [void]$menu.Items.Add('Exit', $null, { Stop-App })
         $ni.ContextMenuStrip = $menu; $ni.Visible = $true
+        $ni.add_DoubleClick({ Show-Settings })   # double-click the tray icon edits thresholds
         $script:Icons[$name] = @{ Ni = $ni; Handle = [IntPtr]::Zero; IconObj = $null }
     }
     $slot = $script:Icons[$name]
@@ -255,6 +301,7 @@ function Invoke-Poll {
 if ($Chart) { Invoke-Chart; if (Test-Path $script:ChartFile) { Start-Process $script:ChartFile }; return }
 
 Write-Log "mousebat starting (GHub ws, toast=$($script:HasToast))"
+Get-Settings   # load saved thresholds (overrides the defaults above)
 # Seed the cache from the last CSV reading so an icon shows at once (mouse may be asleep at logon).
 if (-not (Test-Path $script:StateFile) -and (Test-Path $script:DataFile)) {
     $seed = @{}

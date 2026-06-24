@@ -6,6 +6,7 @@
 # Generated at install time / runtime (machine-specific, regenerated)
 applogo.png
 battery-history.csv
+mousebat-settings.json
 battery-state.json
 battery-chart.png
 .armed
