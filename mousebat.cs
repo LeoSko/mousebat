@@ -18,6 +18,7 @@ using System.Threading;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
 using System.Windows.Forms.DataVisualization.Charting;
+using Microsoft.Win32;
 using Timer = System.Windows.Forms.Timer;
 
 namespace MouseBat
@@ -52,6 +53,11 @@ namespace MouseBat
         string ghubName;
         bool? srvUp;
         Timer timer;
+        bool autostart = true;            // start with Windows (tray toggle), default on
+        bool fastState;                   // currently flagged as draining faster than usual
+        DateTime lastFastToast = DateTime.MinValue;
+        const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
+        const string RunName = "mousebat";
         static readonly int[] MvLUT = {
             4186,4156,4143,4133,4122,4113,4103,4094,4086,4075,4067,4059,4051,4043,4035,4027,4019,4011,4003,3997,
             3989,3983,3976,3969,3961,3955,3949,3942,3935,3929,3922,3916,3909,3902,3896,3890,3883,3877,3870,3865,
@@ -72,6 +78,7 @@ namespace MouseBat
         App()
         {
             LoadSettings(); LoadState(); SeedFromCsv();
+            ReconcileAutostart();   // re-point the Run key at this exe (handles a moved exe)
             Util.Log("mousebat starting (native, HID++ + GHub fallback)");
             Poll();
             if (!File.Exists(Paths.Armed))
@@ -270,6 +277,55 @@ namespace MouseBat
                 UpdateIcon(kv.Key, c.Percent, status, true);
             }
             SaveState();
+            CheckDrainAnomaly();
+        }
+
+        // --- automatic "draining faster than usual" detection ---------------
+        void CheckDrainAnomaly()
+        {
+            double? ratio = AnalyzeDischarge();
+            if (ratio.HasValue && ratio.Value >= 1.4)
+            {
+                if (!fastState && (DateTime.Now - lastFastToast).TotalHours >= 6)
+                {
+                    Toast("Battery draining faster than usual", string.Format(CultureInfo.InvariantCulture, "Recent drain is {0:N1}x your usual rate.", ratio.Value));
+                    lastFastToast = DateTime.Now;
+                }
+                fastState = true;
+            }
+            else if (!ratio.HasValue || ratio.Value < 1.2) { fastState = false; }   // re-arm
+        }
+        // Duration-weighted active drain ratio: recent (<=24 h) vs baseline (older).
+        // Sleep intervals (< 0.5 %/hr) are excluded so idle time never skews it.
+        // Returns null until there is enough active history on each side.
+        double? AnalyzeDischarge()
+        {
+            string[] lines;
+            try { if (!File.Exists(Paths.Csv)) return null; lines = File.ReadAllLines(Paths.Csv); } catch { return null; }
+            var ts = new List<DateTimeOffset>(); var pct = new List<int>(); var chg = new List<bool>();
+            for (int i = 1; i < lines.Length; i++)
+            {
+                var p = lines[i].Split(','); if (p.Length < 4) continue;
+                DateTimeOffset t; int v;
+                if (!DateTimeOffset.TryParse(p[0], null, DateTimeStyles.RoundtripKind, out t)) continue;
+                if (!int.TryParse(p[2], out v)) continue;
+                ts.Add(t); pct.Add(v); chg.Add(p[3].Trim() == "True");
+            }
+            if (ts.Count < 2) return null;
+            const double sleepThresh = 0.5, recentHours = 24, minActiveHours = 3;
+            var now = DateTimeOffset.Now;
+            double rD = 0, rH = 0, bD = 0, bH = 0;
+            for (int i = 1; i < ts.Count; i++)
+            {
+                if (chg[i - 1] || chg[i]) continue;
+                int drop = pct[i - 1] - pct[i]; if (drop <= 0) continue;
+                double h = (ts[i] - ts[i - 1]).TotalHours; if (h <= 0) continue;
+                if (drop / h < sleepThresh) continue;   // sleep interval
+                if ((now - ts[i]).TotalHours <= recentHours) { rD += drop; rH += h; } else { bD += drop; bH += h; }
+            }
+            if (rH < minActiveHours || bH < minActiveHours) return null;
+            double baseRate = bD / bH; if (baseRate <= 0) return null;
+            return (rD / rH) / baseRate;
         }
 
         // --- tray icon -------------------------------------------------------
@@ -281,8 +337,11 @@ namespace MouseBat
                 ni = new NotifyIcon();
                 var menu = new ContextMenuStrip();
                 menu.Items.Add("Settings...", null, (s, e) => ShowSettings());
+                var auto = new ToolStripMenuItem("Start with Windows", null, (s, e) => ToggleAutostart());
+                menu.Items.Add(auto);
                 menu.Items.Add("Battery chart", null, (s, e) => { BuildChart(); OpenChart(); });
                 menu.Items.Add("Exit", null, (s, e) => ExitApp());
+                menu.Opening += (s, e) => auto.Checked = autostart;   // reflect current state
                 ni.ContextMenuStrip = menu;
                 ni.DoubleClick += (s, e) => ShowSettings();
                 ni.Visible = true;
@@ -331,6 +390,23 @@ namespace MouseBat
             foreach (var ni in icons.Values) { ni.Visible = false; if (ni.Icon != null) Native.DestroyIcon(ni.Icon.Handle); ni.Dispose(); }
             ExitThread();
         }
+
+        // --- autostart (HKCU Run key; re-points to the current exe on launch) -
+        void ReconcileAutostart()
+        {
+            try
+            {
+                using (var k = Registry.CurrentUser.CreateSubKey(RunKey))
+                {
+                    string want = "\"" + Application.ExecutablePath + "\"";
+                    string cur = k.GetValue(RunName) as string;
+                    if (autostart) { if (cur != want) { k.SetValue(RunName, want); Util.Log("autostart -> " + want); } }
+                    else if (cur != null) { k.DeleteValue(RunName, false); Util.Log("autostart off"); }
+                }
+            }
+            catch (Exception e) { Util.Log("autostart failed: " + e.Message); }
+        }
+        void ToggleAutostart() { autostart = !autostart; SaveSettings(); ReconcileAutostart(); }
 
         // --- CSV + caches ----------------------------------------------------
         void WriteData(Reading m)
@@ -398,13 +474,19 @@ namespace MouseBat
                 if (o.ContainsKey("FullMin")) FullMin = Convert.ToDouble(o["FullMin"]);
                 if (o.ContainsKey("LowThresh")) LowThresh = Convert.ToDouble(o["LowThresh"]);
                 if (o.ContainsKey("LowRearm")) LowRearm = Convert.ToDouble(o["LowRearm"]);
+                if (o.ContainsKey("Autostart")) autostart = Convert.ToBoolean(o["Autostart"]);
             }
             catch { }
         }
         void SaveSettings()
         {
             var ic = CultureInfo.InvariantCulture;
-            try { File.WriteAllText(Paths.Settings, "{\"FullMin\":" + FullMin.ToString(ic) + ",\"LowThresh\":" + LowThresh.ToString(ic) + ",\"LowRearm\":" + LowRearm.ToString(ic) + "}"); } catch { }
+            try
+            {
+                File.WriteAllText(Paths.Settings, "{\"FullMin\":" + FullMin.ToString(ic) + ",\"LowThresh\":" + LowThresh.ToString(ic) +
+                    ",\"LowRearm\":" + LowRearm.ToString(ic) + ",\"Autostart\":" + (autostart ? "true" : "false") + "}");
+            }
+            catch { }
         }
         NumericUpDown AddNud(Form f, string text, int y, int min, int max, int val)
         {

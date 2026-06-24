@@ -1,8 +1,8 @@
 # mousebat
 
 Windows tray utility for wireless Logitech mouse battery. Shows the level in the
-tray, notifies on full charge and low battery, and logs history for a chart and
-discharge analysis. Single ~26 KB exe, nothing to install, G HUB not required.
+tray, notifies on full charge, low battery, and unusually fast drain, and logs
+history for a chart. Single ~30 KB exe, nothing to install, G HUB not required.
 
 ## How it works
 
@@ -15,6 +15,8 @@ Notifications:
 
 - Full charge: charging stops at or above 95% (default).
 - Low battery: below 5% (default) and not charging, once per drain cycle.
+- Fast drain: recent active drain well above your usual rate (sleep time ignored,
+  so light vs heavy days don't false-trigger).
 
 ## Install
 
@@ -27,29 +29,26 @@ from source:
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
-It compiles the exe with `csc.exe` and registers it to start at logon.
+It compiles the exe with `csc.exe` and launches it. On first run it registers
+itself to start with Windows.
 
-## Settings, chart, stats
+## Tray menu
 
-- Thresholds: double-click the tray icon (or right-click, Settings) to set the
-  low, re-arm and full percentages.
-- Chart: tray menu "Battery chart", or run `mousebat.exe -Chart`.
-- Discharge analysis: `powershell -File discharge-stats.ps1` reports active vs
-  sleep drain rate and whether recent drain is faster than usual.
+- Start with Windows: toggle autostart (the path self-corrects if you move the exe).
+- Settings: set the low, re-arm and full percentages (or double-click the icon).
+- Battery chart: render and open a chart of the history (also `mousebat.exe -Chart`).
 
 ## Files
 
 | File | Purpose |
 |------|---------|
-| `mousebat.cs` | The app: reader, tray icon, toasts, CSV, chart, settings |
+| `mousebat.cs` | The app: reader, tray icon, notifications, CSV, chart, settings |
 | `build.ps1` | Compiles `mousebat.cs` to `mousebat.exe` with `csc.exe` |
-| `install.ps1` | Build and register at logon |
-| `discharge-stats.ps1` | Discharge-rate analysis |
+| `install.ps1` | Build and launch |
 
 ## Releases
 
-GitHub Actions builds the exe on every push. Push a `v*` tag to publish a release
-with the exe attached:
+Push a `v*` tag and GitHub Actions builds the exe and attaches it to a release:
 
 ```bash
 git tag v1.1.0 && git push github v1.1.0
