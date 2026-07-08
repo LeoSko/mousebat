@@ -11,7 +11,7 @@ Animated battery tray icon, colour-coded by level and charging state:
 
 ![tray icon](docs/tray.png)
 
-Thresholds dialog (double-click the tray icon) and battery history chart:
+Settings dialog (double-click the tray icon) and battery history chart:
 
 ![settings](docs/settings.png) ![chart](docs/chart.png)
 
