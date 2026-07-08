@@ -160,41 +160,46 @@ namespace MouseBat
             byte[] r = Hidpp(h, dev, 0, 0, new byte[] { (byte)((fid >> 8) & 0xFF), (byte)(fid & 0xFF) });
             return r != null ? r[4] : 0;
         }
+        // Try every HID++ long-report interface: the receiver AND, when the mouse is
+        // plugged in to charge, its own corded interface (which the receiver can't see).
         Reading ReadHidpp()
         {
-            string path = Native.FindLongHidpp();
-            if (path == null) return null;
-            IntPtr h = Native.Open(path);
-            if (h == (IntPtr)(-1) || h == IntPtr.Zero) return null;
-            try
+            foreach (string path in Native.FindLongHidppAll())
             {
-                foreach (byte dev in new byte[] { 1, 2, 0xFF })
-                {
-                    // Unified Battery (0x1004): modern mice report state-of-charge directly as a %.
-                    int fu = FeatureIndex(h, dev, 0x1004);
-                    if (fu != 0)
-                    {
-                        byte[] r = Hidpp(h, dev, (byte)fu, 1, new byte[0]);   // func 1 = getStatus
-                        if (r != null && r[4] >= 1 && r[4] <= 100)
-                        {
-                            bool chg = r[6] == 1 || r[6] == 2;                // 0 discharging, 1/2 charging
-                            return new Reading { Percent = r[4], Charging = chg };
-                        }
-                    }
-                    // Legacy Battery Voltage (0x1001): older mice report mV, mapped via the LUT.
-                    int fi = FeatureIndex(h, dev, 0x1001);
-                    if (fi == 0) continue;
-                    byte[] rv = Hidpp(h, dev, (byte)fi, 0, new byte[0]);
-                    if (rv == null) continue;
-                    int mv = (rv[4] << 8) | rv[5];
-                    if (mv < 2000) continue;   // implausible (stale/zero)
-                    int flags = rv[6];
-                    bool charging = (flags & 0x80) != 0 && ((flags & 0x07) == 0 || (flags & 0x07) == 1);
-                    return new Reading { Percent = LutPercent(mv), Charging = charging };
-                }
-                return null;
+                IntPtr h = Native.Open(path);
+                if (h == (IntPtr)(-1) || h == IntPtr.Zero) continue;
+                try { Reading r = ReadHidppOn(h); if (r != null) return r; }
+                finally { Native.CloseHandle(h); }
             }
-            finally { Native.CloseHandle(h); }
+            return null;
+        }
+        Reading ReadHidppOn(IntPtr h)
+        {
+            foreach (byte dev in new byte[] { 1, 2, 0xFF })
+            {
+                // Unified Battery (0x1004): modern mice report state-of-charge directly as a %.
+                int fu = FeatureIndex(h, dev, 0x1004);
+                if (fu != 0)
+                {
+                    byte[] r = Hidpp(h, dev, (byte)fu, 1, new byte[0]);   // func 1 = getStatus
+                    if (r != null && r[4] >= 1 && r[4] <= 100)
+                    {
+                        bool chg = r[6] == 1 || r[6] == 2;                // 0 discharging, 1/2 charging
+                        return new Reading { Percent = r[4], Charging = chg };
+                    }
+                }
+                // Legacy Battery Voltage (0x1001): older mice report mV, mapped via the LUT.
+                int fi = FeatureIndex(h, dev, 0x1001);
+                if (fi == 0) continue;
+                byte[] rv = Hidpp(h, dev, (byte)fi, 0, new byte[0]);
+                if (rv == null) continue;
+                int mv = (rv[4] << 8) | rv[5];
+                if (mv < 2000) continue;   // implausible (stale/zero)
+                int flags = rv[6];
+                bool charging = (flags & 0x80) != 0 && ((flags & 0x07) == 0 || (flags & 0x07) == 1);
+                return new Reading { Percent = LutPercent(mv), Charging = charging };
+            }
+            return null;
         }
 
         // --- G HUB websocket fallback ---------------------------------------
@@ -814,8 +819,9 @@ namespace MouseBat
         const uint GENR = 0x80000000, GENW = 0x40000000, SHARE = 3, OPEN = 3, OVL = 0x40000000;
         const int PRESENT = 0x2, IFACE = 0x10;
 
-        public static string FindLongHidpp()
+        public static List<string> FindLongHidppAll()
         {
+            var results = new List<string>();
             Guid g; HidD_GetHidGuid(out g);
             IntPtr set = SetupDiGetClassDevs(ref g, IntPtr.Zero, IntPtr.Zero, PRESENT | IFACE);
             try
@@ -838,13 +844,15 @@ namespace MouseBat
                         if (!HidD_GetAttributes(h, ref a) || a.VendorID != 0x046D) continue;
                         IntPtr pp; if (!HidD_GetPreparsedData(h, out pp)) continue;
                         HIDP_CAPS c; HidP_GetCaps(pp, out c); HidD_FreePreparsedData(pp);
-                        if (c.UsagePage == 0xFF00 && c.OutputReportByteLength == 20) return path;
+                        // 0xFF00 = HID++ via the receiver; 0xFF43 = HID++ on a mouse's own
+                        // corded interface (what a PRO 2 exposes while plugged in to charge).
+                        if ((c.UsagePage == 0xFF00 || c.UsagePage == 0xFF43) && c.OutputReportByteLength == 20) results.Add(path);
                     }
                     finally { CloseHandle(h); }
                 }
             }
             finally { SetupDiDestroyDeviceInfoList(set); }
-            return null;
+            return results;
         }
         public static IntPtr Open(string path) { return CreateFile(path, GENR | GENW, SHARE, IntPtr.Zero, OPEN, OVL, IntPtr.Zero); }
         public static bool Write(IntPtr h, byte[] data)
