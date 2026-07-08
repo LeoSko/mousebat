@@ -1,8 +1,9 @@
 // mousebat - native Logitech mouse battery tray utility.
 // Reads battery directly over HID++ from the receiver (works with G HUB closed),
-// falls back to the G HUB agent's local websocket, draws one numeric tray icon,
-// shows full/low toasts, logs a CSV history, charts it, and edits thresholds from
-// a double-click dialog. Compiles with the built-in csc.exe to a ~20 KB exe.
+// falls back to the G HUB agent's local websocket, draws an animated battery tray
+// icon, sends graduated low/critical/full nudges (lock-aware, per-tier cadence),
+// logs a CSV history, charts it, and edits thresholds from a double-click dialog.
+// Compiles with the built-in csc.exe to a ~20 KB exe.
 using System;
 using System.Collections.Generic;
 using System.Drawing;
@@ -25,6 +26,7 @@ namespace MouseBat
 {
     class Reading { public string Name; public int Percent; public bool Charging; }
     class ReadResult { public bool Reachable; public string Source = ""; public List<Reading> Mice = new List<Reading>(); }
+    class IconState { public int Pct; public string Status; }
 
     static class Paths
     {
@@ -45,14 +47,25 @@ namespace MouseBat
     class App : ApplicationContext
     {
         double FullMin = 95, LowThresh = 5, LowRearm = 10;
+        // nudge cadences (configurable): repeat the alert while the condition holds.
+        int NudgeLowStep = 1;             // re-nudge every N% drop below LowThresh
+        int NudgeRearmStep = 5;           // re-nudge every N% drop below LowRearm
+        int NudgeCritSecs = 15;           // re-nudge every N seconds at/below CritPct
+        int NudgeFullMins = 5;            // re-nudge every N minutes while full & charging
+        const int CritPct = 1;            // "critical" battery level
+        const int NudgeMaxStaleSecs = 70; // stop nudging within ~1 poll of the mouse going quiet
         readonly Dictionary<string, NotifyIcon> icons = new Dictionary<string, NotifyIcon>();
-        readonly Dictionary<string, bool> prevCharging = new Dictionary<string, bool>();
-        readonly Dictionary<string, bool> lowFired = new Dictionary<string, bool>();
+        readonly Dictionary<string, IconState> iconState = new Dictionary<string, IconState>();
+        readonly Dictionary<string, int> nudgePct = new Dictionary<string, int>();
+        readonly Dictionary<string, DateTime> nudgeTime = new Dictionary<string, DateTime>();
+        readonly Dictionary<string, DateTime> lastSeen = new Dictionary<string, DateTime>();
         readonly Dictionary<string, string> lastRow = new Dictionary<string, string>();
         Dictionary<string, Reading> state = new Dictionary<string, Reading>();
         string ghubName;
         bool? srvUp;
-        Timer timer;
+        Timer timer, anim, nudgeTimer;
+        int frame;                        // tray-icon animation frame counter
+        bool locked;                      // workstation session locked (suppress nudges)
         bool autostart = true;            // start with Windows (tray toggle), default on
         bool fastState;                   // currently flagged as draining faster than usual
         DateTime lastFastToast = DateTime.MinValue;
@@ -78,6 +91,7 @@ namespace MouseBat
         App()
         {
             LoadSettings(); LoadState(); SeedFromCsv();
+            try { locked = Native.IsLocked(); } catch { }   // seed lock state (kept live by SessionSwitch)
             ReconcileAutostart();   // re-point the Run key at this exe (handles a moved exe)
             Util.Log("mousebat starting (native, HID++ + GHub fallback)");
             Poll();
@@ -89,6 +103,19 @@ namespace MouseBat
             timer = new Timer { Interval = 60000 };
             timer.Tick += (s, e) => Poll();
             timer.Start();
+            anim = new Timer { Interval = 150 };
+            anim.Tick += (s, e) => AnimTick();
+            anim.Start();
+            nudgeTimer = new Timer { Interval = 5000 };
+            nudgeTimer.Tick += (s, e) => EvaluateNudges();
+            nudgeTimer.Start();
+            SystemEvents.SessionSwitch += OnSessionSwitch;
+        }
+
+        void OnSessionSwitch(object s, SessionSwitchEventArgs e)
+        {
+            if (e.Reason == SessionSwitchReason.SessionLock) locked = true;
+            else if (e.Reason == SessionSwitchReason.SessionUnlock) locked = false;
         }
 
         // --- reader dispatch: HID++ first, G HUB websocket fallback ---------
@@ -273,15 +300,10 @@ namespace MouseBat
             {
                 fresh.Add(m.Name);
                 state[m.Name] = m;
+                lastSeen[m.Name] = DateTime.Now;
                 WriteData(m);
                 string status = m.Charging ? (m.Percent >= FullMin ? "full" : "charging") : "discharging";
                 UpdateIcon(m.Name, m.Percent, status, false);
-                bool prev; prevCharging.TryGetValue(m.Name, out prev);
-                if (prev && !m.Charging && m.Percent >= FullMin) Toast(m.Name + " fully charged", m.Name + " at " + m.Percent + "% - unplug it.");
-                bool lf; lowFired.TryGetValue(m.Name, out lf);
-                if (!m.Charging && m.Percent < LowThresh && !lf) { Toast(m.Name + " battery low", m.Name + " at " + m.Percent + "% - charge it."); lowFired[m.Name] = true; }
-                if (m.Charging || m.Percent >= LowRearm) lowFired[m.Name] = false;
-                prevCharging[m.Name] = m.Charging;
             }
             foreach (var kv in state)
             {
@@ -293,6 +315,52 @@ namespace MouseBat
             EnsurePlaceholder();   // show "?" icon until a mouse reports; removed once one does
             SaveState();
             CheckDrainAnomaly();
+            EvaluateNudges();
+        }
+
+        // --- graduated, lock-aware battery nudges ---------------------------
+        // A nudge repeats while its condition holds. Time-based tiers (crit/full)
+        // fire off the cached reading between polls but self-gate by elapsed time
+        // and stop within ~one poll of the mouse going quiet (NudgeMaxStaleSecs).
+        // Percent-drop tiers (low/rearm) re-arm only once the battery recovers
+        // (>= LowRearm or charging), so jitter around a threshold can't spam them.
+        string NudgeTier(Reading m)
+        {
+            if (m.Charging) return m.Percent >= FullMin ? "full" : null;
+            if (m.Percent <= CritPct) return "crit";
+            if (m.Percent < LowThresh) return "low";
+            if (m.Percent < LowRearm) return "rearm";
+            return null;
+        }
+        void EvaluateNudges()
+        {
+            if (locked) return;
+            var now = DateTime.Now;
+            foreach (var kv in state)
+            {
+                string name = kv.Key; Reading m = kv.Value;
+                DateTime seen;
+                if (!lastSeen.TryGetValue(name, out seen)) continue;
+                if ((now - seen).TotalSeconds > NudgeMaxStaleSecs) continue;   // quiet / gone
+                string tier = NudgeTier(m);
+                if (tier == null) { nudgePct[name] = -1; continue; }           // recovered: re-arm %-tiers
+
+                DateTime last; if (!nudgeTime.TryGetValue(name, out last)) last = DateTime.MinValue;
+                bool fire;
+                if (tier == "full") fire = (now - last).TotalMinutes >= NudgeFullMins;
+                else if (tier == "crit") fire = (now - last).TotalSeconds >= NudgeCritSecs;
+                else
+                {
+                    int step = tier == "low" ? NudgeLowStep : NudgeRearmStep;
+                    int lp; if (!nudgePct.TryGetValue(name, out lp)) lp = -1;
+                    fire = lp < 0 || lp - m.Percent >= step;   // fire on entry, then every step% dropped
+                }
+                if (!fire) continue;
+                nudgeTime[name] = now;
+                if (tier == "full") ToastOn(name, m.Name + " fully charged", m.Name + " at " + m.Percent + "% - unplug it.");
+                else if (tier == "crit") ToastOn(name, m.Name + " critically low", m.Name + " at " + m.Percent + "% - charge now.");
+                else { nudgePct[name] = m.Percent; ToastOn(name, m.Name + " battery low", m.Name + " at " + m.Percent + "% - charge it."); }
+            }
         }
 
         // --- automatic "draining faster than usual" detection ---------------
@@ -301,7 +369,7 @@ namespace MouseBat
             double? ratio = AnalyzeDischarge();
             if (ratio.HasValue && ratio.Value >= 1.4)
             {
-                if (!fastState && (DateTime.Now - lastFastToast).TotalHours >= 6)
+                if (!locked && !fastState && (DateTime.Now - lastFastToast).TotalHours >= 6)
                 {
                     Toast("Battery draining faster than usual", string.Format(CultureInfo.InvariantCulture, "Recent drain is {0:N1}x your usual rate.", ratio.Value));
                     lastFastToast = DateTime.Now;
@@ -369,7 +437,7 @@ namespace MouseBat
             if (icons.Keys.Any(k => k != PlaceholderKey)) { RemovePlaceholder(); return; }
             if (icons.ContainsKey(PlaceholderKey)) return;
             var ni = NewTrayIcon();
-            ni.Icon = MakeIcon(0, "none");
+            ni.Icon = MakeIcon(0, "none", 0);
             ni.Text = "Mouse battery: waiting for a reading";
             icons[PlaceholderKey] = ni;
         }
@@ -387,40 +455,131 @@ namespace MouseBat
         {
             NotifyIcon ni;
             if (!icons.TryGetValue(name, out ni)) { ni = NewTrayIcon(); icons[name] = ni; }
-            Icon old = ni.Icon;
-            ni.Icon = MakeIcon(pct, status);
-            if (old != null) { Native.DestroyIcon(old.Handle); old.Dispose(); }
+            iconState[name] = new IconState { Pct = pct, Status = status };
+            RenderIcon(ni, pct, status);
             string tip = name + " - " + pct + "% (" + status + ")" + (stale ? " - last known" : "");
             if (tip.Length > 63) tip = tip.Substring(0, 63);
             ni.Text = tip;
         }
-        Icon MakeIcon(int pct, string status)
+        void RenderIcon(NotifyIcon ni, int pct, string status)
+        {
+            Icon old = ni.Icon;
+            ni.Icon = MakeIcon(pct, status, frame);
+            if (old != null) { Native.DestroyIcon(old.Handle); old.Dispose(); }
+        }
+        // Re-draw only the icons whose state animates; steady healthy levels stay static.
+        void AnimTick()
+        {
+            frame++;
+            foreach (var kv in icons)
+            {
+                IconState st;
+                if (iconState.TryGetValue(kv.Key, out st) && IsAnimated(st.Status, st.Pct))
+                    RenderIcon(kv.Value, st.Pct, st.Status);
+            }
+        }
+        bool IsAnimated(string status, int pct)
+        {
+            return status == "charging" || status == "full" || (status == "discharging" && pct < (int)LowRearm);
+        }
+        static Color LevelColor(int pct, string status)
+        {
+            if (status == "none") return Color.FromArgb(127, 140, 141);
+            if (status == "full") return Color.FromArgb(39, 174, 96);
+            if (status == "charging") return Color.FromArgb(41, 128, 185);
+            if (pct >= 60) return Color.FromArgb(46, 204, 113);
+            if (pct >= 30) return Color.FromArgb(243, 156, 18);
+            return Color.FromArgb(231, 76, 60);
+        }
+        static Color Lerp(Color a, Color b, double t)
+        {
+            if (t < 0) t = 0; if (t > 1) t = 1;
+            return Color.FromArgb((int)(a.R + (b.R - a.R) * t), (int)(a.G + (b.G - a.G) * t), (int)(a.B + (b.B - a.B) * t));
+        }
+        static GraphicsPath RoundRect(RectangleF r, float rad)
+        {
+            var p = new GraphicsPath(); float d = rad * 2;
+            p.AddArc(r.X, r.Y, d, d, 180, 90);
+            p.AddArc(r.Right - d, r.Y, d, d, 270, 90);
+            p.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
+            p.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
+            p.CloseFigure(); return p;
+        }
+        static double Triangle(int frame, int period)   // 0 -> 1 -> 0 over `period` frames
+        {
+            int ph = ((frame % period) + period) % period;
+            double t = ph / (double)period;
+            return t < 0.5 ? t * 2 : (1 - t) * 2;
+        }
+        // A rounded battery: body + terminal nub, fill height = charge %, colour by
+        // level. Charging tops the fill up in a rising wave; low/full states pulse.
+        Icon MakeIcon(int pct, string status, int frame)
         {
             var bmp = new Bitmap(32, 32);
-            var g = Graphics.FromImage(bmp);
-            g.SmoothingMode = SmoothingMode.AntiAlias; g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
-            g.Clear(Color.Transparent);
-            Color col;
-            if (status == "none") col = Color.FromArgb(127, 140, 141);
-            else if (status == "full") col = Color.FromArgb(39, 174, 96);
-            else if (status == "charging") col = Color.FromArgb(41, 128, 185);
-            else if (pct >= 60) col = Color.FromArgb(46, 204, 113);
-            else if (pct >= 30) col = Color.FromArgb(243, 156, 18);
-            else col = Color.FromArgb(231, 76, 60);
-            using (var br = new SolidBrush(col)) g.FillEllipse(br, 0, 0, 31, 31);
-            string label = status == "none" ? "?" : (pct >= 100 ? "F" : pct.ToString());
-            int fpx = label.Length >= 3 ? 13 : label.Length == 2 ? 17 : 21;
-            using (var font = new Font("Segoe UI", fpx, FontStyle.Bold, GraphicsUnit.Pixel))
-            using (var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
-                g.DrawString(label, font, Brushes.White, new RectangleF(0, 0, 32, 32), sf);
-            g.Dispose();
+            using (var g = Graphics.FromImage(bmp))
+            {
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+                g.Clear(Color.Transparent);
+
+                Color col = LevelColor(pct, status);
+                bool pulseLow = status == "discharging" && pct < (int)LowRearm;
+                double pulse = 0.5 + 0.5 * Math.Sin(frame / 8.0 * 2 * Math.PI);
+                Color outline = col;
+                if (pulseLow) outline = Lerp(col, Color.White, pulse * 0.55);
+                else if (status == "full") outline = Lerp(col, Color.White, pulse * 0.35);
+
+                var body = new RectangleF(6.5f, 7f, 19f, 22f);
+                using (var nb = new SolidBrush(col)) g.FillRectangle(nb, 13f, 3.5f, 6f, 4f);   // terminal nub
+
+                // fill level (charging tops it up toward full in a rising triangle wave)
+                double frac = status == "none" ? 0 : pct / 100.0;
+                if (status == "charging") frac = Math.Min(1.0, frac + (1.0 - frac) * Triangle(frame, 16) * 0.4);
+                if (frac > 0)
+                {
+                    const float inset = 2.5f;
+                    var inner = new RectangleF(body.X + inset, body.Y + inset, body.Width - 2 * inset, body.Height - 2 * inset);
+                    float fh = (float)(inner.Height * frac);
+                    var fillR = new RectangleF(inner.X, inner.Bottom - fh, inner.Width, fh);
+                    using (var path = RoundRect(fillR, Math.Min(2.5f, fh / 2f)))
+                    using (var fb = new SolidBrush(Color.FromArgb(220, col))) g.FillPath(fb, path);
+                }
+                if (status == "charging")   // rising highlight band
+                {
+                    float top = body.Y + 2.5f, bot = body.Bottom - 2.5f;
+                    float y = bot - (float)((bot - top) * (frame % 16) / 16.0);
+                    using (var hb = new SolidBrush(Color.FromArgb(70, 255, 255, 255)))
+                        g.FillRectangle(hb, body.X + 2.5f, y - 1.5f, body.Width - 5f, 3f);
+                }
+                using (var path = RoundRect(body, 4f))
+                using (var pen = new Pen(outline, 2f)) g.DrawPath(pen, path);
+
+                string label = status == "none" ? "?" : (pct >= 100 ? "F" : pct.ToString());
+                int fpx = label.Length >= 2 ? 14 : 17;
+                using (var font = new Font("Segoe UI", fpx, FontStyle.Bold, GraphicsUnit.Pixel))
+                using (var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
+                {
+                    var box = new RectangleF(0, 5, 32, 27);
+                    using (var halo = new SolidBrush(Color.FromArgb(190, 0, 0, 0)))
+                    {
+                        g.DrawString(label, font, halo, new RectangleF(box.X + 1, box.Y + 1, box.Width, box.Height), sf);
+                        g.DrawString(label, font, halo, new RectangleF(box.X - 1, box.Y + 1, box.Width, box.Height), sf);
+                    }
+                    g.DrawString(label, font, Brushes.White, box, sf);
+                }
+            }
             IntPtr hicon = bmp.GetHicon();
             bmp.Dispose();
             return Icon.FromHandle(hicon);
         }
-        void Toast(string title, string text)
+        void Toast(string title, string text) { ToastOn(null, title, text); }
+        // Show the balloon on the named mouse's own icon so that, when several mice
+        // nudge in the same pass, one does not overwrite another's pending balloon.
+        void ToastOn(string name, string title, string text)
         {
-            var ni = icons.Values.FirstOrDefault();
+            NotifyIcon ni = null;
+            if (name != null) icons.TryGetValue(name, out ni);
+            if (ni == null) ni = icons.Values.FirstOrDefault();
             if (ni == null) return;
             ni.BalloonTipIcon = ToolTipIcon.Info; ni.BalloonTipTitle = title; ni.BalloonTipText = text;
             try { ni.ShowBalloonTip(5000); } catch { }
@@ -428,6 +587,9 @@ namespace MouseBat
         void ExitApp()
         {
             if (timer != null) timer.Stop();
+            if (anim != null) anim.Stop();
+            if (nudgeTimer != null) nudgeTimer.Stop();
+            SystemEvents.SessionSwitch -= OnSessionSwitch;
             foreach (var ni in icons.Values) { ni.Visible = false; if (ni.Icon != null) Native.DestroyIcon(ni.Icon.Handle); ni.Dispose(); }
             ExitThread();
         }
@@ -516,6 +678,10 @@ namespace MouseBat
                 if (o.ContainsKey("LowThresh")) LowThresh = Convert.ToDouble(o["LowThresh"]);
                 if (o.ContainsKey("LowRearm")) LowRearm = Convert.ToDouble(o["LowRearm"]);
                 if (o.ContainsKey("Autostart")) autostart = Convert.ToBoolean(o["Autostart"]);
+                if (o.ContainsKey("NudgeLowStep")) NudgeLowStep = Convert.ToInt32(o["NudgeLowStep"]);
+                if (o.ContainsKey("NudgeRearmStep")) NudgeRearmStep = Convert.ToInt32(o["NudgeRearmStep"]);
+                if (o.ContainsKey("NudgeCritSecs")) NudgeCritSecs = Convert.ToInt32(o["NudgeCritSecs"]);
+                if (o.ContainsKey("NudgeFullMins")) NudgeFullMins = Convert.ToInt32(o["NudgeFullMins"]);
             }
             catch { }
         }
@@ -525,7 +691,9 @@ namespace MouseBat
             try
             {
                 File.WriteAllText(Paths.Settings, "{\"FullMin\":" + FullMin.ToString(ic) + ",\"LowThresh\":" + LowThresh.ToString(ic) +
-                    ",\"LowRearm\":" + LowRearm.ToString(ic) + ",\"Autostart\":" + (autostart ? "true" : "false") + "}");
+                    ",\"LowRearm\":" + LowRearm.ToString(ic) + ",\"Autostart\":" + (autostart ? "true" : "false") +
+                    ",\"NudgeLowStep\":" + NudgeLowStep + ",\"NudgeRearmStep\":" + NudgeRearmStep +
+                    ",\"NudgeCritSecs\":" + NudgeCritSecs + ",\"NudgeFullMins\":" + NudgeFullMins + "}");
             }
             catch { }
         }
@@ -540,21 +708,28 @@ namespace MouseBat
         {
             using (var f = new Form())
             {
-                f.Text = "Mouse Battery - notification thresholds";
-                f.ClientSize = new Size(310, 170);
+                f.Text = "Mouse Battery - notifications";
+                f.ClientSize = new Size(320, 300);
                 f.FormBorderStyle = FormBorderStyle.FixedDialog; f.StartPosition = FormStartPosition.CenterScreen;
                 f.MaximizeBox = false; f.MinimizeBox = false; f.TopMost = true; f.ShowInTaskbar = false;
-                var nLow = AddNud(f, "Low battery warning at (%):", 20, 1, 50, (int)LowThresh);
-                var nRe = AddNud(f, "Re-arm low warning above (%):", 52, 1, 60, (int)LowRearm);
-                var nFull = AddNud(f, "Full charge at (%):", 84, 50, 100, (int)FullMin);
-                var ok = new Button { Text = "Save", Bounds = new Rectangle(135, 128, 75, 28), DialogResult = DialogResult.OK };
-                var cn = new Button { Text = "Cancel", Bounds = new Rectangle(218, 128, 75, 28), DialogResult = DialogResult.Cancel };
+                var nLow = AddNud(f, "Low battery warning at (%):", 16, 1, 50, (int)LowThresh);
+                var nRe = AddNud(f, "Re-arm low warning above (%):", 48, 1, 60, (int)LowRearm);
+                var nFull = AddNud(f, "Full charge at (%):", 80, 50, 100, (int)FullMin);
+                var nSl = AddNud(f, "Nudge every N% drop below low:", 112, 1, 20, NudgeLowStep);
+                var nSr = AddNud(f, "Nudge every N% drop below re-arm:", 144, 1, 20, NudgeRearmStep);
+                var nCs = AddNud(f, "Critical nudge every (sec):", 176, 5, 600, NudgeCritSecs);
+                var nFm = AddNud(f, "Full-charge nudge every (min):", 208, 1, 120, NudgeFullMins);
+                var ok = new Button { Text = "Save", Bounds = new Rectangle(145, 256, 75, 28), DialogResult = DialogResult.OK };
+                var cn = new Button { Text = "Cancel", Bounds = new Rectangle(228, 256, 75, 28), DialogResult = DialogResult.Cancel };
                 f.Controls.Add(ok); f.Controls.Add(cn); f.AcceptButton = ok; f.CancelButton = cn;
                 if (f.ShowDialog() == DialogResult.OK)
                 {
                     LowThresh = (double)nLow.Value; LowRearm = (double)nRe.Value; FullMin = (double)nFull.Value;
+                    NudgeLowStep = (int)nSl.Value; NudgeRearmStep = (int)nSr.Value;
+                    NudgeCritSecs = (int)nCs.Value; NudgeFullMins = (int)nFm.Value;
                     SaveSettings();
-                    Util.Log("settings updated: low=" + LowThresh + " rearm=" + LowRearm + " full=" + FullMin);
+                    Util.Log("settings updated: low=" + LowThresh + " rearm=" + LowRearm + " full=" + FullMin +
+                        " step=" + NudgeLowStep + "/" + NudgeRearmStep + " crit=" + NudgeCritSecs + "s fullEvery=" + NudgeFullMins + "m");
                 }
             }
         }
@@ -623,6 +798,18 @@ namespace MouseBat
         [DllImport("kernel32.dll")] static extern bool GetOverlappedResult(IntPtr h, ref OVERLAPPED o, out int n, bool wait);
         [DllImport("kernel32.dll")] static extern bool CancelIo(IntPtr h);
         [DllImport("user32.dll")] public static extern bool DestroyIcon(IntPtr h);
+        [DllImport("user32.dll", SetLastError = true)] static extern IntPtr OpenInputDesktop(uint flags, bool inherit, uint access);
+        [DllImport("user32.dll")] static extern bool CloseDesktop(IntPtr h);
+
+        // Locked <=> the interactive input desktop is the secure (Winlogon) desktop,
+        // which a normal-integrity process cannot open. Used to seed the lock state
+        // at startup (SessionSwitch keeps it live thereafter).
+        public static bool IsLocked()
+        {
+            IntPtr d = OpenInputDesktop(0, false, 0x0100 /* DESKTOP_SWITCHDESKTOP */);
+            if (d == IntPtr.Zero) return true;
+            CloseDesktop(d); return false;
+        }
 
         const uint GENR = 0x80000000, GENW = 0x40000000, SHARE = 3, OPEN = 3, OVL = 0x40000000;
         const int PRESENT = 0x2, IFACE = 0x10;
