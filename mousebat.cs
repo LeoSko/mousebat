@@ -54,6 +54,7 @@ namespace MouseBat
         int NudgeFullMins = 5;            // re-nudge every N minutes while full & charging
         const int CritPct = 1;            // "critical" battery level
         const int NudgeMaxStaleSecs = 70; // stop nudging within ~1 poll of the mouse going quiet
+        const string GenericName = "Logitech Mouse"; // synthetic HID++ name before the real one is known
         readonly Dictionary<string, NotifyIcon> icons = new Dictionary<string, NotifyIcon>();
         readonly Dictionary<string, IconState> iconState = new Dictionary<string, IconState>();
         readonly Dictionary<string, int> nudgePct = new Dictionary<string, int>();
@@ -91,6 +92,11 @@ namespace MouseBat
         App()
         {
             LoadSettings(); LoadState(); SeedFromCsv();
+            // The real device name only ever comes from G HUB, but HID++ is the primary
+            // source and G HUB may never run. Recover a name G HUB learned on an earlier
+            // run from the persisted state so HID++ readings keep it instead of minting
+            // the generic ghost.
+            if (ghubName == null) ghubName = state.Keys.FirstOrDefault(k => k != GenericName);
             try { locked = Native.IsLocked(); } catch { }   // seed lock state (kept live by SessionSwitch)
             ReconcileAutostart();   // re-point the Run key at this exe (handles a moved exe)
             Util.Log("mousebat starting (native, HID++ + GHub fallback)");
@@ -126,11 +132,11 @@ namespace MouseBat
             if (hid != null)
             {
                 if (ghubName != null) hid.Name = ghubName;
-                else { var k = state.Keys.ToList(); hid.Name = k.Count == 1 ? k[0] : "Logitech Mouse"; }
+                else { var k = state.Keys.ToList(); hid.Name = k.Count == 1 ? k[0] : GenericName; }
                 return new ReadResult { Reachable = true, Source = "hidpp", Mice = new List<Reading> { hid } };
             }
             var g = ReadGHub();
-            foreach (var m in g.Mice) ghubName = m.Name;
+            foreach (var m in g.Mice) if (ghubName != m.Name) { ghubName = m.Name; SaveSettings(); }
             return g;
         }
 
@@ -310,7 +316,10 @@ namespace MouseBat
                 string status = m.Charging ? (m.Percent >= FullMin ? "full" : "charging") : "discharging";
                 UpdateIcon(m.Name, m.Percent, status, false);
             }
-            foreach (var kv in state)
+            // Once the real device name is known, evict the synthetic HID++ ghost so a
+            // single mouse can't show two icons (generic "last known" beside the real one).
+            if (ghubName != null && ghubName != GenericName && !fresh.Contains(GenericName)) DropDevice(GenericName);
+            foreach (var kv in state.ToList())
             {
                 if (fresh.Contains(kv.Key)) continue;
                 var c = kv.Value;
@@ -456,6 +465,21 @@ namespace MouseBat
             ni.Dispose();
         }
 
+        // Fully forget a device: drop its icon and every per-device cache entry.
+        void DropDevice(string name)
+        {
+            NotifyIcon ni;
+            if (icons.TryGetValue(name, out ni))
+            {
+                icons.Remove(name);
+                ni.Visible = false;
+                if (ni.Icon != null) Native.DestroyIcon(ni.Icon.Handle);
+                ni.Dispose();
+            }
+            state.Remove(name); iconState.Remove(name); lastSeen.Remove(name);
+            lastRow.Remove(name); nudgePct.Remove(name); nudgeTime.Remove(name);
+            Util.Log("dropped stale device: " + name);
+        }
         void UpdateIcon(string name, int pct, string status, bool stale)
         {
             NotifyIcon ni;
@@ -687,6 +711,7 @@ namespace MouseBat
                 if (o.ContainsKey("NudgeRearmStep")) NudgeRearmStep = Convert.ToInt32(o["NudgeRearmStep"]);
                 if (o.ContainsKey("NudgeCritSecs")) NudgeCritSecs = Convert.ToInt32(o["NudgeCritSecs"]);
                 if (o.ContainsKey("NudgeFullMins")) NudgeFullMins = Convert.ToInt32(o["NudgeFullMins"]);
+                if (o.ContainsKey("GhubName")) { var n = Convert.ToString(o["GhubName"]); if (!string.IsNullOrEmpty(n)) ghubName = n; }
             }
             catch { }
         }
@@ -698,7 +723,8 @@ namespace MouseBat
                 File.WriteAllText(Paths.Settings, "{\"FullMin\":" + FullMin.ToString(ic) + ",\"LowThresh\":" + LowThresh.ToString(ic) +
                     ",\"LowRearm\":" + LowRearm.ToString(ic) + ",\"Autostart\":" + (autostart ? "true" : "false") +
                     ",\"NudgeLowStep\":" + NudgeLowStep + ",\"NudgeRearmStep\":" + NudgeRearmStep +
-                    ",\"NudgeCritSecs\":" + NudgeCritSecs + ",\"NudgeFullMins\":" + NudgeFullMins + "}");
+                    ",\"NudgeCritSecs\":" + NudgeCritSecs + ",\"NudgeFullMins\":" + NudgeFullMins +
+                    ",\"GhubName\":\"" + (ghubName ?? "").Replace("\\", "").Replace("\"", "") + "\"}");
             }
             catch { }
         }
