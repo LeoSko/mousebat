@@ -11,6 +11,7 @@ mousebat-settings.json
 
 # Tooling state
 .aislop/
+CLAUDE.md
 
 # OS cruft
 Thumbs.db
