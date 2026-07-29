@@ -380,23 +380,39 @@ namespace MouseBat
         // --- automatic "draining faster than usual" detection ---------------
         void CheckDrainAnomaly()
         {
-            double? ratio = AnalyzeDischarge();
-            if (ratio.HasValue && ratio.Value >= 1.4)
+            double recentRate;
+            double? ratio = AnalyzeDischarge(out recentRate);
+            // Both tests must pass: a big relative jump AND an absolute rate worth
+            // mentioning, so a 1.8x jump from 0.2 to 0.4 %/hr never raises an alarm.
+            if (ratio.HasValue && ratio.Value >= FastRatio && recentRate >= FastMinRate)
             {
                 if (!locked && !fastState && (DateTime.Now - lastFastToast).TotalHours >= 6)
                 {
-                    Toast("Battery draining faster than usual", string.Format(CultureInfo.InvariantCulture, "Recent drain is {0:N1}x your usual rate.", ratio.Value));
+                    Toast("Battery draining faster than usual", string.Format(CultureInfo.InvariantCulture, "Recent drain is {0:N1}x your usual rate ({1:N1}%/hr).", ratio.Value, recentRate));
                     lastFastToast = DateTime.Now;
                 }
                 fastState = true;
             }
-            else if (!ratio.HasValue || ratio.Value < 1.2) { fastState = false; }   // re-arm
+            else if (!ratio.HasValue || ratio.Value < FastRearm) { fastState = false; }   // re-arm
         }
-        // Duration-weighted active drain ratio: recent (<=24 h) vs baseline (older).
-        // Sleep intervals (< 0.5 %/hr) are excluded so idle time never skews it.
-        // Returns null until there is enough active history on each side.
-        double? AnalyzeDischarge()
+        // Duration-weighted active drain ratio: recent (<=24 h) vs baseline (older),
+        // plus the recent rate itself via <paramref name="recentRate"/> (%/hr).
+        // Intervals are skipped unless they can carry a trustworthy rate, because the
+        // gauge reports whole percents and lies in places:
+        //   - sleep (< 0.5 %/hr): idle time would drag the average down
+        //   - shorter than 15 min: a single 1 % step spans minutes, so the implied
+        //     rate is quantization noise (1 % over 1 min reads as 60 %/hr)
+        //   - within 30 min of charging: the gauge re-references after unplugging and
+        //     walks down several percent in minutes without real drain
+        //   - below 20 %: the discharge curve steepens near empty, so the tail is not
+        //     comparable with mid-range readings
+        // Returns null until there is enough usable history on each side.
+        const double FastRatio = 1.8;     // recent/baseline drain ratio that counts as fast
+        const double FastRearm = 1.4;     // ratio below which the flag re-arms
+        const double FastMinRate = 1.5;   // %/hr floor before "fast" means anything
+        double? AnalyzeDischarge(out double recentRate)
         {
+            recentRate = 0;
             string[] lines;
             try { if (!File.Exists(Paths.Csv)) return null; lines = File.ReadAllLines(Paths.Csv); } catch { return null; }
             var ts = new List<DateTimeOffset>(); var pct = new List<int>(); var chg = new List<bool>();
@@ -409,20 +425,28 @@ namespace MouseBat
                 ts.Add(t); pct.Add(v); chg.Add(p[3].Trim() == "True");
             }
             if (ts.Count < 2) return null;
-            const double sleepThresh = 0.5, recentHours = 24, minActiveHours = 3;
+            const double sleepThresh = 0.5, recentHours = 24, minActiveHours = 4;
+            const double minSpanHours = 0.25, settleHours = 0.5;
+            const int minPct = 20;
             var now = DateTimeOffset.Now;
             double rD = 0, rH = 0, bD = 0, bH = 0;
+            DateTimeOffset lastCharge = DateTimeOffset.MinValue;
             for (int i = 1; i < ts.Count; i++)
             {
+                if (chg[i - 1]) lastCharge = ts[i - 1];
+                if (chg[i]) lastCharge = ts[i];
                 if (chg[i - 1] || chg[i]) continue;
                 int drop = pct[i - 1] - pct[i]; if (drop <= 0) continue;
-                double h = (ts[i] - ts[i - 1]).TotalHours; if (h <= 0) continue;
-                if (drop / h < sleepThresh) continue;   // sleep interval
+                double h = (ts[i] - ts[i - 1]).TotalHours; if (h < minSpanHours) continue;
+                if (pct[i] < minPct) continue;                                     // steep near-empty tail
+                if ((ts[i - 1] - lastCharge).TotalHours < settleHours) continue;    // post-charge gauge settle
+                if (drop / h < sleepThresh) continue;                               // sleep interval
                 if ((now - ts[i]).TotalHours <= recentHours) { rD += drop; rH += h; } else { bD += drop; bH += h; }
             }
             if (rH < minActiveHours || bH < minActiveHours) return null;
             double baseRate = bD / bH; if (baseRate <= 0) return null;
-            return (rD / rH) / baseRate;
+            recentRate = rD / rH;
+            return recentRate / baseRate;
         }
 
         // --- tray icon -------------------------------------------------------
