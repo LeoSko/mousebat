@@ -36,7 +36,6 @@ namespace MouseBat
         public static readonly string Settings = Path.Combine(Dir, "mousebat-settings.json");
         public static readonly string Chart = Path.Combine(Dir, "battery-chart.png");
         public static readonly string Log = Path.Combine(Dir, "mousebat.log");
-        public static readonly string Armed = Path.Combine(Dir, ".armed");
     }
 
     static class Util
@@ -101,11 +100,6 @@ namespace MouseBat
             ReconcileAutostart();   // re-point the Run key at this exe (handles a moved exe)
             Util.Log("mousebat starting (native, HID++ + GHub fallback)");
             Poll();
-            if (!File.Exists(Paths.Armed))
-            {
-                Toast("Mouse battery watcher armed", "Pings on full charge and below " + LowThresh + "%.");
-                try { File.WriteAllText(Paths.Armed, ""); } catch { }
-            }
             timer = new Timer { Interval = 60000 };
             timer.Tick += (s, e) => Poll();
             timer.Start();
