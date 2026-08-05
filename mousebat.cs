@@ -196,8 +196,17 @@ namespace MouseBat
                 int mv = (rv[4] << 8) | rv[5];
                 if (mv < 2000) continue;   // implausible (stale/zero)
                 int flags = rv[6];
-                bool charging = (flags & 0x80) != 0 && ((flags & 0x07) == 0 || (flags & 0x07) == 1);
-                return new Reading { Percent = LutPercent(mv), Charging = charging };
+                // Bit 7 = on charge; the low two bits are the charge status
+                // (0 discharging, 1 recharging, 2 final stage, 3 complete).
+                if ((flags & 0x80) == 0) return new Reading { Percent = LutPercent(mv), Charging = false };
+                if ((flags & 0x03) == 3) return new Reading { Percent = 100, Charging = true };
+                // On charge the charge current inflates the terminal voltage, so the
+                // discharge LUT reads far too high - a 5 % cell reads 82 % a minute after
+                // plugging in. A mouse with only 0x1001 exposes no state of charge to read
+                // instead (no 0x1004/0x1000), so hold the last reading taken off charge
+                // until the firmware reports the charge complete.
+                var held = state.Values.FirstOrDefault();
+                return new Reading { Percent = held != null ? held.Percent : LutPercent(mv), Charging = true };
             }
             return null;
         }
