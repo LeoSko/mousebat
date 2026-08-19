@@ -42,7 +42,7 @@ $packed = Join-Path $tmp 'mousebat-core.b64'
 
 # A 32-byte "no resources" .res, so csc omits the ~1 KB version block.
 $res = Join-Path $tmp 'mousebat-empty.res'
-[IO.File]::WriteAllBytes($res, ([byte[]]@(0,0,0,0,0x20,0,0,0,0xFF,0xFF,0,0,0xFF,0xFF,0,0) + (New-Object byte[] 16)))
+[IO.File]::WriteAllBytes($res, ([byte[]]@(0,0,0,0,0x20,0,0,0,0xFF,0xFF,0,0,0xFF,0xFF,0,0) + [byte[]]::new(16)))
 
 # --- stage 1: the program itself, as a library -----------------------------
 & $csc /nologo /optimize+ /target:library "/out:$core" `
@@ -53,8 +53,8 @@ if ($LASTEXITCODE -ne 0) { throw "csc failed on mousebat.cs (exit $LASTEXITCODE)
 
 # --- stage 2: deflate it, then base64 it -----------------------------------
 $raw = [IO.File]::ReadAllBytes($core)
-$ms  = New-Object IO.MemoryStream
-$ds  = New-Object IO.Compression.DeflateStream($ms, [IO.Compression.CompressionLevel]::Optimal)
+$ms  = [IO.MemoryStream]::new()
+$ds  = [IO.Compression.DeflateStream]::new($ms, [IO.Compression.CompressionLevel]::Optimal)
 $ds.Write($raw, 0, $raw.Length); $ds.Dispose()
 $deflated = $ms.ToArray()
 [IO.File]::WriteAllText($packed, [Convert]::ToBase64String($deflated))
