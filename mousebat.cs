@@ -3,7 +3,8 @@
 // falls back to the G HUB agent's local websocket, draws an animated battery tray
 // icon, sends graduated low/critical/full nudges (lock-aware, per-tier cadence),
 // logs a CSV history, charts it, and edits thresholds from a double-click dialog.
-// Compiles with the built-in csc.exe to a ~36 KB exe.
+// Compiles with the built-in csc.exe. build.ps1 ships it compressed inside
+// loader.cs, which keeps the exe under 30 KB.
 using System;
 using System.Collections.Generic;
 using System.Drawing;

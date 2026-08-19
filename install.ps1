@@ -3,7 +3,7 @@
   Installs the native mousebat mouse-battery tray utility.
 
 .DESCRIPTION
-  - Compiles mousebat.exe (~36 KB) with the built-in C# compiler (csc.exe).
+  - Compiles mousebat.exe (~27 KB) with the built-in C# compiler (csc.exe).
   - Launches it. The app registers itself to start at logon on first run (toggle
     it from the tray menu); source and build script stay in the repo, so the
     install folder holds only the exe and its runtime data.
