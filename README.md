@@ -4,7 +4,7 @@ Logitech's G HUB knows how much battery your wireless mouse has left. The catch 
 that seeing the number means running G HUB, a fat background service with a login,
 for one integer. I wanted the integer and none of the rest. So mousebat reads the
 battery straight off the receiver over HID++ and paints it as a little battery in
-the tray. About 30 KB, nothing to install, and G HUB can stay shut.
+the tray. About 36 KB, nothing to install, and G HUB can stay shut.
 
 It also nags you at the moments that actually matter: when you're about to run out,
 and when it's been charging long enough that you should unplug it.
