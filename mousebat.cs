@@ -1,8 +1,9 @@
 // mousebat - native Logitech mouse battery tray utility.
 // Reads battery directly over HID++ from the receiver (works with G HUB closed),
 // falls back to the G HUB agent's local websocket, draws an animated battery tray
-// icon, sends graduated low/critical/full nudges (lock-aware, per-tier cadence),
-// logs a CSV history, charts it, and edits thresholds from a double-click dialog.
+// icon, sends graduated low/critical/full/quiet nudges (lock-aware, per-tier
+// cadence), logs a CSV history, charts it, and edits thresholds from a
+// double-click dialog.
 // Compiles with the built-in csc.exe. build.ps1 ships it compressed inside
 // loader.cs, which keeps the exe under 30 KB.
 using System;
@@ -52,6 +53,7 @@ namespace MouseBat
         int NudgeRearmStep = 5;           // re-nudge every N% drop below LowRearm
         int NudgeCritSecs = 15;           // re-nudge every N seconds at/below CritPct
         int NudgeFullMins = 5;            // re-nudge every N minutes while full & charging
+        int NudgeQuietHrs = 2;            // re-nudge every N hours while a low mouse stays quiet
         const int CritPct = 1;            // "critical" battery level
         const int NudgeMaxStaleSecs = 70; // stop nudging within ~1 poll of the mouse going quiet
         const string GenericName = "Logitech Mouse"; // synthetic HID++ name before the real one is known
@@ -97,6 +99,10 @@ namespace MouseBat
             // run from the persisted state so HID++ readings keep it instead of minting
             // the generic ghost.
             if (ghubName == null) ghubName = state.Keys.FirstOrDefault(k => k != GenericName);
+            // A device restored without a sighting time (state file written by an older
+            // build, or seeded from the CSV) counts launch as its last sighting, so the
+            // quiet nudge measures from a moment this run can vouch for.
+            foreach (var k in state.Keys) if (!lastSeen.ContainsKey(k)) lastSeen[k] = DateTime.Now;
             try { locked = Native.IsLocked(); } catch { }   // seed lock state (kept live by SessionSwitch)
             ReconcileAutostart();   // re-point the Run key at this exe (handles a moved exe)
             Util.Log("mousebat starting (native, HID++ + GHub fallback)");
@@ -342,6 +348,7 @@ namespace MouseBat
         // and stop within ~one poll of the mouse going quiet (NudgeMaxStaleSecs).
         // Percent-drop tiers (low/rearm) re-arm only once the battery recovers
         // (>= LowRearm or charging), so jitter around a threshold can't spam them.
+        // A mouse that goes quiet below LowRearm keeps a slow "went quiet" nudge.
         string NudgeTier(Reading m)
         {
             if (m.Charging) return m.Percent >= FullMin ? "full" : null;
@@ -359,7 +366,22 @@ namespace MouseBat
                 string name = kv.Key; Reading m = kv.Value;
                 DateTime seen;
                 if (!lastSeen.TryGetValue(name, out seen)) continue;
-                if ((now - seen).TotalSeconds > NudgeMaxStaleSecs) continue;   // quiet / gone
+                if ((now - seen).TotalSeconds > NudgeMaxStaleSecs)
+                {
+                    // A mouse that goes quiet on a low battery never recovers on its
+                    // own, so falling silent with it hides the one case worth saying.
+                    // Warn on a slow cadence while it stays away and stays low.
+                    if (m.Charging || m.Percent >= LowRearm) continue;
+                    DateTime lq; if (!nudgeTime.TryGetValue(name, out lq)) lq = seen;
+                    if ((now - lq).TotalHours < NudgeQuietHrs) continue;
+                    nudgeTime[name] = now;
+                    int quietHrs = (int)Math.Round((now - seen).TotalHours);
+                    // Logged, unlike the live tiers: this one fires while you are away
+                    // from the machine, so the log is often the only place it lands.
+                    Util.Log("quiet nudge: " + name + " last seen " + seen.ToString("yyyy-MM-dd HH:mm") + " at " + m.Percent + "%");
+                    ToastOn(name, m.Name + " went quiet", m.Name + " last seen at " + m.Percent + "% - quiet for " + quietHrs + "h. Charge it.");
+                    continue;
+                }
                 string tier = NudgeTier(m);
                 if (tier == null) { nudgePct[name] = -1; continue; }           // recovered: re-arm %-tiers
 
@@ -689,7 +711,14 @@ namespace MouseBat
             {
                 if (!File.Exists(Paths.State)) return;
                 var o = new JavaScriptSerializer().Deserialize<Dictionary<string, Dictionary<string, object>>>(File.ReadAllText(Paths.State));
-                foreach (var kv in o) state[kv.Key] = new Reading { Name = kv.Key, Percent = Convert.ToInt32(kv.Value["Percent"]), Charging = Convert.ToBoolean(kv.Value["Charging"]) };
+                foreach (var kv in o)
+                {
+                    state[kv.Key] = new Reading { Name = kv.Key, Percent = Convert.ToInt32(kv.Value["Percent"]), Charging = Convert.ToBoolean(kv.Value["Charging"]) };
+                    object seen; DateTime dt;
+                    if (kv.Value.TryGetValue("Seen", out seen) &&
+                        DateTime.TryParse(Convert.ToString(seen), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out dt))
+                        lastSeen[kv.Key] = dt;
+                }
             }
             catch { }
         }
@@ -701,7 +730,9 @@ namespace MouseBat
                 foreach (var kv in state)
                 {
                     if (!first) sb.Append(","); first = false;
-                    sb.Append("\"" + kv.Key.Replace("\"", "") + "\":{\"Percent\":" + kv.Value.Percent + ",\"Charging\":" + (kv.Value.Charging ? "true" : "false") + "}");
+                    DateTime seen;
+                    string seenJson = lastSeen.TryGetValue(kv.Key, out seen) ? ",\"Seen\":\"" + seen.ToString("o", CultureInfo.InvariantCulture) + "\"" : "";
+                    sb.Append("\"" + kv.Key.Replace("\"", "") + "\":{\"Percent\":" + kv.Value.Percent + ",\"Charging\":" + (kv.Value.Charging ? "true" : "false") + seenJson + "}");
                 }
                 sb.Append("}");
                 File.WriteAllText(Paths.State, sb.ToString());
@@ -739,6 +770,7 @@ namespace MouseBat
                 if (o.ContainsKey("NudgeRearmStep")) NudgeRearmStep = Convert.ToInt32(o["NudgeRearmStep"]);
                 if (o.ContainsKey("NudgeCritSecs")) NudgeCritSecs = Convert.ToInt32(o["NudgeCritSecs"]);
                 if (o.ContainsKey("NudgeFullMins")) NudgeFullMins = Convert.ToInt32(o["NudgeFullMins"]);
+                if (o.ContainsKey("NudgeQuietHrs")) NudgeQuietHrs = Convert.ToInt32(o["NudgeQuietHrs"]);
                 if (o.ContainsKey("GhubName")) { var n = Convert.ToString(o["GhubName"]); if (!string.IsNullOrEmpty(n)) ghubName = n; }
             }
             catch { }
@@ -752,6 +784,7 @@ namespace MouseBat
                     ",\"LowRearm\":" + LowRearm.ToString(ic) + ",\"Autostart\":" + (autostart ? "true" : "false") +
                     ",\"NudgeLowStep\":" + NudgeLowStep + ",\"NudgeRearmStep\":" + NudgeRearmStep +
                     ",\"NudgeCritSecs\":" + NudgeCritSecs + ",\"NudgeFullMins\":" + NudgeFullMins +
+                    ",\"NudgeQuietHrs\":" + NudgeQuietHrs +
                     ",\"GhubName\":\"" + (ghubName ?? "").Replace("\\", "").Replace("\"", "") + "\"}");
             }
             catch { }
@@ -768,7 +801,7 @@ namespace MouseBat
             using (var f = new Form())
             {
                 f.Text = "Mouse Battery - notifications";
-                f.ClientSize = new Size(320, 300);
+                f.ClientSize = new Size(320, 332);
                 f.FormBorderStyle = FormBorderStyle.FixedDialog; f.StartPosition = FormStartPosition.CenterScreen;
                 f.MaximizeBox = false; f.MinimizeBox = false; f.TopMost = true; f.ShowInTaskbar = false;
                 var nLow = AddNud(f, "Low battery warning at (%):", 16, 1, 50, (int)LowThresh);
@@ -778,17 +811,20 @@ namespace MouseBat
                 var nSr = AddNud(f, "Nudge every N% drop below re-arm:", 144, 1, 20, NudgeRearmStep);
                 var nCs = AddNud(f, "Critical nudge every (sec):", 176, 5, 600, NudgeCritSecs);
                 var nFm = AddNud(f, "Full-charge nudge every (min):", 208, 1, 120, NudgeFullMins);
-                var ok = new Button { Text = "Save", Bounds = new Rectangle(145, 256, 75, 28), DialogResult = DialogResult.OK };
-                var cn = new Button { Text = "Cancel", Bounds = new Rectangle(228, 256, 75, 28), DialogResult = DialogResult.Cancel };
+                var nQh = AddNud(f, "Quiet-mouse nudge every (hr):", 240, 1, 48, NudgeQuietHrs);
+                var ok = new Button { Text = "Save", Bounds = new Rectangle(145, 288, 75, 28), DialogResult = DialogResult.OK };
+                var cn = new Button { Text = "Cancel", Bounds = new Rectangle(228, 288, 75, 28), DialogResult = DialogResult.Cancel };
                 f.Controls.Add(ok); f.Controls.Add(cn); f.AcceptButton = ok; f.CancelButton = cn;
                 if (f.ShowDialog() == DialogResult.OK)
                 {
                     LowThresh = (double)nLow.Value; LowRearm = (double)nRe.Value; FullMin = (double)nFull.Value;
                     NudgeLowStep = (int)nSl.Value; NudgeRearmStep = (int)nSr.Value;
                     NudgeCritSecs = (int)nCs.Value; NudgeFullMins = (int)nFm.Value;
+                    NudgeQuietHrs = (int)nQh.Value;
                     SaveSettings();
                     Util.Log("settings updated: low=" + LowThresh + " rearm=" + LowRearm + " full=" + FullMin +
-                        " step=" + NudgeLowStep + "/" + NudgeRearmStep + " crit=" + NudgeCritSecs + "s fullEvery=" + NudgeFullMins + "m");
+                        " step=" + NudgeLowStep + "/" + NudgeRearmStep + " crit=" + NudgeCritSecs + "s fullEvery=" + NudgeFullMins + "m" +
+                        " quietEvery=" + NudgeQuietHrs + "h");
                 }
             }
         }

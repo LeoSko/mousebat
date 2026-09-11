@@ -41,9 +41,13 @@ All the numbers below are yours to change:
   pull the cable.
 - **Fast drain.** When your recent active drain runs well above your normal rate. It
   ignores sleep time, so a lazy day and a heavy day don't set off false alarms.
+- **Quiet.** A mouse that drops off the air below the re-arm level and stays off it —
+  flat battery, switched off, receiver pulled — gets a reminder every 2 hours saying
+  when you last saw it and at what percent. The last sighting survives a restart, so
+  a mouse that died overnight tells you at login instead of never.
 
-Two things it won't do: nudge you while the workstation is locked, or act on a stale
-reading from a mouse that's gone to sleep.
+Two things it won't do: nudge you while the workstation is locked, or read a percent
+off a stale reading from a mouse that's gone to sleep.
 
 ## Install
 
