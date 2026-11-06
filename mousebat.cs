@@ -4,8 +4,7 @@
 // icon, sends graduated low/critical/full/quiet nudges (lock-aware, per-tier
 // cadence), logs a CSV history, charts it, and edits thresholds from a
 // double-click dialog.
-// Compiles with the built-in csc.exe. build.ps1 ships it compressed inside
-// loader.cs, which keeps the exe under 30 KB.
+// Compiles with the built-in csc.exe into one plain exe under 50 KB (build.ps1).
 using System;
 using System.Collections.Generic;
 using System.Drawing;

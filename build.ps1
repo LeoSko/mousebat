@@ -3,20 +3,16 @@
   Compiles mousebat.cs into a native windowless exe with the built-in C# compiler.
 
 .DESCRIPTION
-  Three-stage build, because a straight compile of mousebat.cs lands at ~36 KB
-  and the exe budget is 30 KB:
+  One plain compile, and the exe budget is 50 KB.
 
-    1. mousebat.cs compiles to a library. That is the whole program.
-    2. The library is deflated (IL and metadata compress about 2:1) and then
-       base64-encoded. Base64 costs 33%, but Smart App Control blocks an
-       unsigned exe holding a high-entropy resource, so the text form is what
-       makes the result runnable. See the header of loader.cs.
-    3. loader.cs compiles to the exe, carrying that text as a resource and
-       inflating it at startup.
+  The exe used to ship deflated inside a loader stub to fit a 30 KB budget.
+  ESET flagged that shape as Trojan.ML/Augur (a stub that unpacks an encoded
+  payload at startup reads as a packer) and deleted the exe. The plain exe
+  does not trip it.
 
-  Three size switches on top: /optimize+, /platform:x64 (drops the 32-bit
-  startup stub and its .reloc section), and an empty /win32res (replaces the
-  auto-generated version block). Neither changes behaviour.
+  Two size switches: /platform:x64 (drops the 32-bit startup stub and its
+  .reloc section) and an empty /win32res (replaces the auto-generated version
+  block). Neither changes behaviour.
 
   Extra references beyond the csc defaults:
   System.Web.Extensions (JavaScriptSerializer, for G HUB JSON) and
@@ -33,37 +29,20 @@ $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 if (-not (Test-Path $csc)) { $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework\v4.0.30319\csc.exe' }
 if (-not (Test-Path $csc)) { throw "csc.exe not found (need .NET Framework 4.x)" }
 
-$src    = Join-Path $PSScriptRoot 'mousebat.cs'
-$loader = Join-Path $PSScriptRoot 'loader.cs'
-$out    = Join-Path $OutDir $ExeName
-$tmp    = [IO.Path]::GetTempPath()
-$core   = Join-Path $tmp 'mousebat-core.dll'
-$packed = Join-Path $tmp 'mousebat-core.b64'
+$src = Join-Path $PSScriptRoot 'mousebat.cs'
+$out = Join-Path $OutDir $ExeName
 
 # A 32-byte "no resources" .res, so csc omits the ~1 KB version block.
-$res = Join-Path $tmp 'mousebat-empty.res'
+$res = Join-Path ([IO.Path]::GetTempPath()) 'mousebat-empty.res'
 [IO.File]::WriteAllBytes($res, ([byte[]]@(0,0,0,0,0x20,0,0,0,0xFF,0xFF,0,0,0xFF,0xFF,0,0) + [byte[]]::new(16)))
 
-# --- stage 1: the program itself, as a library -----------------------------
-& $csc /nologo /optimize+ /target:library "/out:$core" `
+& $csc /nologo /optimize+ /target:winexe /platform:x64 "/win32res:$res" "/out:$out" `
     /reference:System.Web.Extensions.dll `
     /reference:System.Windows.Forms.DataVisualization.dll `
     $src
 if ($LASTEXITCODE -ne 0) { throw "csc failed on mousebat.cs (exit $LASTEXITCODE)" }
 
-# --- stage 2: deflate it, then base64 it -----------------------------------
-$raw = [IO.File]::ReadAllBytes($core)
-$ms  = [IO.MemoryStream]::new()
-$ds  = [IO.Compression.DeflateStream]::new($ms, [IO.Compression.CompressionLevel]::Optimal)
-$ds.Write($raw, 0, $raw.Length); $ds.Dispose()
-$deflated = $ms.ToArray()
-[IO.File]::WriteAllText($packed, [Convert]::ToBase64String($deflated))
-
-# --- stage 3: the loader stub, carrying the encoded library ----------------
-& $csc /nologo /optimize+ /target:winexe /platform:x64 "/win32res:$res" "/resource:$packed,c" "/out:$out" $loader
-if ($LASTEXITCODE -ne 0) { throw "csc failed on loader.cs (exit $LASTEXITCODE)" }
-
-if (Test-Path $out) {
-    "built $out ({0:N0} bytes; program {1:N0} -> {2:N0} deflated -> {3:N0} base64)" -f `
-        (Get-Item $out).Length, $raw.Length, $deflated.Length, (Get-Item $packed).Length
-} else { throw 'build failed' }
+if (-not (Test-Path $out)) { throw 'build failed' }
+$size = (Get-Item $out).Length
+if ($size -gt 50KB) { throw ("exe is {0:N0} bytes, over the 50 KB budget" -f $size) }
+"built $out ({0:N0} bytes)" -f $size
